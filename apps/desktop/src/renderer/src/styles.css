@@ -406,3 +406,5 @@ button.tnode:hover { border-color: var(--line2); background: #232837; }
 ::-webkit-scrollbar-thumb { background: #2a2f3c; border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
 @keyframes pulse { 50% { opacity: .45; } }
 @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+.presets { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 12px; }
+.presets > div { flex-basis: 100%; }

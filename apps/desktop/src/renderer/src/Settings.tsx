@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { AgentDef, AgentTestResult, AppInfo, CodexModel, MaoApi, Quota, Settings } from "../../shared/types";
 import { EFFORT_TEXT, who } from "./derive";
 import { Avatar, DeepseekBalance, QuotaLine } from "./App";
+import geminiAvatar from "./assets/avatars/gemini.png";
+import dafeiyuAvatar from "./assets/avatars/dafeiyu.png";
 
 const mao = (window as unknown as { mao: MaoApi }).mao;
 const cleanError = (e: any) => String(e?.message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
@@ -26,6 +28,54 @@ function cropToSquare(src: string): Promise<string> {
     img.onerror = () => reject(new Error("无法读取这张图片"));
     img.src = src;
   });
+}
+
+const PRESET_AVATARS: Record<string, string> = { gemini: geminiAvatar, dafeiyu: dafeiyuAvatar };
+
+/** Bundled image URL → PNG data URL (what setAgentAvatar expects). */
+async function toPngDataUrl(url: string): Promise<string> {
+  const blob = await (await fetch(url)).blob();
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("读取头像失败"));
+    r.readAsDataURL(blob);
+  });
+}
+
+type Preset = Awaited<ReturnType<MaoApi["agentPresets"]>>[number];
+
+/** 「从模板添加」: one click adds a ready-made agent (settings + avatar). Adding again updates it. */
+function Presets({ agents }: { agents: AgentDef[] }) {
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => {
+    mao.agentPresets().then(setPresets).catch(() => {});
+  }, []);
+  const add = async (p: Preset) => {
+    if (!p.def) return setMsg(p.note);
+    try {
+      const existing = agents.find((a) => a.id === p.def!.id || a.name === p.def!.name);
+      const saved = await mao.saveAgent({ ...p.def, id: existing?.id ?? p.def.id });
+      const img = PRESET_AVATARS[p.key];
+      if (img) await mao.setAgentAvatar(saved.id, await toPngDataUrl(img));
+      setMsg(`已${existing ? "更新" : "添加"}「${saved.name}」。${p.note}`);
+    } catch (e) {
+      setMsg(cleanError(e));
+    }
+  };
+  if (!presets.length) return null;
+  return (
+    <div className="presets">
+      <span className="muted small">从模板添加：</span>
+      {presets.map((p) => (
+        <button key={p.key} className="btn small" title={p.note} onClick={() => add(p)}>
+          ＋ {p.label}
+        </button>
+      ))}
+      {msg && <div className="muted small">{msg}</div>}
+    </div>
+  );
 }
 
 const blankAgent = (): AgentDef => ({
@@ -298,6 +348,8 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
             </button>
           </div>
           <p className="muted small">Claude 是主管，下面是它可以派活的成员。新增的成员会自动出现在 Claude 的团队名单里（按「擅长」说明分派），不需要改任何代码。</p>
+          <Presets agents={agents} />
+
           <div className="agent-list">
             {agents.map((a) => {
               const t = tests[a.id];

@@ -262,7 +262,7 @@ claude-studio/
 示例：Google 的 Gemini CLI（命令行程序，能直接改项目里的文件）
 1. 安装：`npm install -g @google/gemini-cli`。
 2. 在 [Google AI Studio](https://aistudio.google.com/apikey) 申请 API Key，设成用户环境变量 `GEMINI_API_KEY`。用 Google 账号登录的方式已不再支持命令行客户端。环境变量设好后不用重启应用：命令行智能体每次启动时都会读取最新的用户环境变量，日志里会把 Key 打码。
-3. 添加智能体时填写（路径以 nvm4w 为例，按自己的 Node 安装位置改）：
+3. 最省事：设置 → 智能体 →「从模板添加：＋ Gemini CLI」，应用会自动找到安装位置并填好下面这些（头像一起配好）。想手动添加的话这样填（路径以 nvm4w 为例，按自己的 Node 安装位置改）：
    - 可执行文件：`C:\nvm4w\nodejs\node.exe`
    - 参数：`C:\nvm4w\nodejs\node_modules\@google\gemini-cli\bundle\gemini.js -m gemini-3-flash-preview -p " " -o stream-json --approval-mode auto_edit --skip-trust`
    - 任务通过 stdin 传入，输出选 JSONL，回答字段填 `content`（分段输出会自动拼接，token 用量从最后的 `result.stats` 读取）

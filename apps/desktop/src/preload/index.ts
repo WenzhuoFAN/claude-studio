@@ -29,6 +29,7 @@ const api: MaoApi = {
   listAgents: () => ipcRenderer.invoke("listAgents"),
   agentAvatars: () => ipcRenderer.invoke("agentAvatars"),
   saveAgent: (def, apiKey) => ipcRenderer.invoke("saveAgent", def, apiKey),
+  agentPresets: () => ipcRenderer.invoke("agentPresets"),
   removeAgent: (id) => ipcRenderer.invoke("removeAgent", id),
   setAgentAvatar: (id, png) => ipcRenderer.invoke("setAgentAvatar", id, png),
   testAgent: (def, apiKey) => ipcRenderer.invoke("testAgent", def, apiKey),

@@ -188,6 +188,8 @@ export interface MaoApi {
   listAgents(): Promise<AgentDef[]>;
   agentAvatars(): Promise<Record<string, string>>;
   saveAgent(def: AgentDef, apiKey?: string | null): Promise<AgentDef>;
+  /** Ready-made agents for「从模板添加」; def is null when the tool isn't installed (note says why). */
+  agentPresets(): Promise<{ key: string; label: string; note: string; def: AgentDef | null }[]>;
   removeAgent(id: string): Promise<void>;
   setAgentAvatar(id: string, pngDataUrl: string): Promise<void>;
   testAgent(def: AgentDef, apiKey?: string | null): Promise<AgentTestResult>;

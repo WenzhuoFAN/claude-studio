@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { readBoard } from "../../../../packages/bridge/src/board";
 import path from "node:path";
@@ -112,6 +112,73 @@ async function testAgent(def: AgentDef, apiKey?: string | null): Promise<AgentTe
   return { ok: true, text: "内置智能体：请用环境检查和一次真实委派来验证。", durationSec: 0 };
 }
 
+/** Find Gemini CLI's node entry script (npm global install): returns node.exe + bundle/gemini.js, or null. */
+function locateGemini(): { node: string; script: string } | null {
+  const dirs: string[] = [];
+  try {
+    for (const p of execFileSync("where.exe", ["gemini.cmd"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).split(/\r?\n/)) if (p.trim()) dirs.push(path.dirname(p.trim()));
+  } catch {
+    /* not on PATH */
+  }
+  dirs.push(process.env.NVM_SYMLINK ?? "", "C:\\nvm4w\\nodejs", path.join(process.env.APPDATA ?? "", "npm"));
+  for (const d of dirs) {
+    if (!d) continue;
+    const script = path.join(d, "node_modules", "@google", "gemini-cli", "bundle", "gemini.js");
+    const node = existsSync(path.join(d, "node.exe")) ? path.join(d, "node.exe") : "node.exe";
+    if (existsSync(script)) return { node, script };
+  }
+  return null;
+}
+
+/** Ready-made agent definitions for 设置 →「从模板添加」. The avatar is a bundled image (renderer side). */
+function agentPresets(): { key: string; label: string; note: string; def: AgentDef | null }[] {
+  const g = locateGemini();
+  return [
+    {
+      key: "gemini",
+      label: "Gemini CLI",
+      note: g ? "需要用户环境变量 GEMINI_API_KEY（Google AI Studio 申请）" : "没找到 Gemini CLI：先运行 npm install -g @google/gemini-cli",
+      def: g
+        ? {
+            id: "gemini",
+            name: "Gemini",
+            type: "cli",
+            color: "#8E6CF0",
+            role: "长上下文，适合通读整个项目、找 bug、代码审查第二意见、写文档；免费额度有限，不派大批量生成",
+            canEdit: true,
+            canRun: false,
+            enabled: true,
+            cli: {
+              exe: g.node,
+              args: `"${g.script}" -m gemini-3-flash-preview -p " " -o stream-json --approval-mode auto_edit --skip-trust`,
+              input: "stdin",
+              output: "jsonl",
+              answerField: "content",
+              healthCmd: `"${g.node}" -e "process.exit(process.env.GEMINI_API_KEY ? 0 : 1)"`,
+              loginCmd: "explorer.exe https://aistudio.google.com/apikey",
+            },
+          }
+        : null,
+    },
+    {
+      key: "dafeiyu",
+      label: "本地大肥鱼（llama.cpp 本地模型）",
+      note: "OpenAI 兼容接口 http://127.0.0.1:18141/v1，不需要 Key",
+      def: {
+        id: "",
+        name: "本地大肥鱼",
+        type: "openai",
+        color: "#4FB6D8",
+        role: "本机运行的免费模型（DeepSeek V4.1-Flash 量化版，通过 OpenAI 兼容接口）：适合写文档、注释、简单函数和第二意见评审；速度较慢，不能直接改文件，由 Claude 落地。",
+        canEdit: false,
+        canRun: false,
+        enabled: true,
+        openai: { baseUrl: "http://127.0.0.1:18141/v1", model: "deepseek-v4.1-flash" },
+      },
+    },
+  ];
+}
+
 let modelsCache: CodexModel[] | null = null;
 
 /** Codex's own model catalog (`codex debug models`), visible models only. */
@@ -212,6 +279,7 @@ function registerIpc() {
   ipcMain.handle("listProjects", () => projects.list());
   ipcMain.handle("listAgents", () => agents.all());
   ipcMain.handle("agentAvatars", () => Object.fromEntries(agents.all().map((a) => [a.id, agents.avatarDataUrl(a.id)]).filter(([, v]) => v)));
+  ipcMain.handle("agentPresets", () => agentPresets());
   ipcMain.handle("saveAgent", (_e, def: AgentDef, apiKey?: string | null) => agents.upsert(def, apiKey));
   ipcMain.handle("removeAgent", (_e, id: string) => agents.remove(id));
   ipcMain.handle("setAgentAvatar", (_e, id: string, png: string) => agents.setAvatar(id, png));
