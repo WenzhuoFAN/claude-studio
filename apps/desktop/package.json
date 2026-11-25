@@ -1,7 +1,7 @@
 {
   "name": "claude-studio",
   "productName": "Claude 的工作室",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "private": true,
   "description": "Claude 的工作室：Claude 当主管，调度 Codex、DeepSeek 和你添加的智能体一起写代码",
   "author": "claude-studio",
