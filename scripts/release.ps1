@@ -21,7 +21,11 @@ $Desktop = Join-Path $Root 'apps\desktop'
 $Repo = 'WenzhuoFAN/claude-studio'
 
 function Invoke-Checked([string]$What, [scriptblock]$Block) {
-  & $Block
+  # Windows PowerShell 5.1 turns any stderr line of a native command (e.g. git's CRLF warning)
+  # into an error under 'Stop'; judge success by the exit code instead.
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $Block 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $prev }
   if ($LASTEXITCODE -ne 0) { throw "$What 失败（退出码 $LASTEXITCODE）" }
 }
 
