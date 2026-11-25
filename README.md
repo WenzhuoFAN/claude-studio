@@ -100,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
 
 ### 头像
 
-角色图片在 `apps/desktop/src/renderer/src/assets/avatars/`（`full/` 里是全身原图）：Claude = 橙发拿书的女孩，Codex = 白发龙娘，DeepSeek = 蓝发鲸鱼女仆，Gemini = 蓝紫发带星星的猫娘。替换同名文件后重新编译即可。Gemini 是在设置里添加的智能体，它的头像要在「编辑」里选 `gemini.png` 设置。
+角色图片在 `apps/desktop/src/renderer/src/assets/avatars/`（`full/` 里是全身原图）：Claude = 橙发拿书的女孩，Codex = 白发龙娘，DeepSeek = 蓝发鲸鱼女仆，Gemini = 蓝紫发带星星的猫娘，本地大肥鱼 = Q 版鲸鱼女仆（`dafeiyu.png`）。替换同名文件后重新编译即可。Gemini 和本地大肥鱼是在设置里添加的智能体，头像要在「编辑」里选对应的图片设置。
 
 ## 工作原理
 
