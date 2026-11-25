@@ -100,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
 
 ### 头像
 
-三个角色的图片在 `apps/desktop/src/renderer/src/assets/avatars/`（`full/` 里是全身原图）：Claude = 橙发拿书的女孩，Codex = 白发龙娘，DeepSeek = 蓝发鲸鱼女仆。替换同名文件后重新编译即可。
+角色图片在 `apps/desktop/src/renderer/src/assets/avatars/`（`full/` 里是全身原图）：Claude = 橙发拿书的女孩，Codex = 白发龙娘，DeepSeek = 蓝发鲸鱼女仆，Gemini = 蓝紫发带星星的猫娘。替换同名文件后重新编译即可。Gemini 是在设置里添加的智能体，它的头像要在「编辑」里选 `gemini.png` 设置。
 
 ## 工作原理
 
@@ -258,6 +258,18 @@ claude-studio/
 - Base URL：`http://127.0.0.1:18141/v1`
 - 模型名：`deepseek-v4.1-flash`
 - API Key：留空
+
+示例：Google 的 Gemini CLI（命令行程序，能直接改项目里的文件）
+1. 安装：`npm install -g @google/gemini-cli`。
+2. 在 [Google AI Studio](https://aistudio.google.com/apikey) 申请 API Key，设成用户环境变量 `GEMINI_API_KEY`。用 Google 账号登录的方式已不再支持命令行客户端。环境变量设好后不用重启应用：命令行智能体每次启动时都会读取最新的用户环境变量，日志里会把 Key 打码。
+3. 添加智能体时填写（路径以 nvm4w 为例，按自己的 Node 安装位置改）：
+   - 可执行文件：`C:\nvm4w\nodejs\node.exe`
+   - 参数：`C:\nvm4w\nodejs\node_modules\@google\gemini-cli\bundle\gemini.js -m gemini-3-flash-preview -p " " -o stream-json --approval-mode auto_edit --skip-trust`
+   - 任务通过 stdin 传入，输出选 JSONL，回答字段填 `content`（分段输出会自动拼接，token 用量从最后的 `result.stats` 读取）
+   - 能改文件：是；能运行命令：否。`auto_edit` 只自动批准改文件，命令一律不执行。
+   - 健康检查：`C:\nvm4w\nodejs\node.exe -e "process.exit(process.env.GEMINI_API_KEY ? 0 : 1)"`
+   - 登录命令：`explorer.exe https://aistudio.google.com/apikey`（打开申请 Key 的页面）
+4. 固定用 flash 模型（`-m gemini-3-flash-preview`）：默认的 auto 会选 pro 模型，免费额度里 pro 的每日配额是 0。
 
 ## 从源码构建
 

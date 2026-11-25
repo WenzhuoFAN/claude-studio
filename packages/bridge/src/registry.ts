@@ -7,7 +7,8 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { runAgent, type AgentResult, type Parser } from "./runner.js";
+import { freshUserEnv } from "./locate.js";
+import { runAgent, type AgentResult, type Parser, type Usage } from "./runner.js";
 
 export interface AgentDef {
   id: string;
@@ -55,9 +56,29 @@ function getPath(obj: any, dotted: string): unknown {
   return dotted.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
 }
 
+const num = (...vs: unknown[]) => vs.find((v): v is number => typeof v === "number");
+
+/** Token usage from a result/stats event, snake_case or camelCase (Gemini CLI: result.stats). */
+function usageOf(ev: any): Usage | undefined {
+  const u = ev?.stats ?? ev?.usage;
+  if (!u || typeof u !== "object") return undefined;
+  const r: Usage = {
+    inputTokens: num(u.input_tokens, u.inputTokens, u.prompt_tokens),
+    cachedInputTokens: num(u.cached, u.cached_tokens, u.cachedInputTokens),
+    outputTokens: num(u.output_tokens, u.outputTokens, u.completion_tokens),
+    totalTokens: num(u.total_tokens, u.totalTokens),
+  };
+  if (r.totalTokens === undefined && (r.inputTokens !== undefined || r.outputTokens !== undefined)) r.totalTokens = (r.inputTokens ?? 0) + (r.outputTokens ?? 0);
+  return r.totalTokens !== undefined ? r : undefined;
+}
+
 class GenericParser implements Parser {
   private lines: string[] = [];
   private answer = "";
+  /** Streamed answer pieces (events with delta: true), joined per assistant turn. */
+  private streamed = "";
+  private use: Usage | undefined;
+  private failed = false;
   private errs: string[] = [];
   constructor(private mode: "text" | "jsonl", private field?: string) {}
   onRaw(line: string) {
@@ -69,21 +90,46 @@ class GenericParser implements Parser {
       return;
     }
     const v = this.field ? getPath(ev, this.field) : (ev?.text ?? ev?.message ?? ev?.content);
-    if (typeof v === "string" && v.trim()) this.answer = v;
+    if (ev?.role === "user") {
+      // echo of the task, never the answer
+    } else if (typeof v === "string" && v.trim() !== "") {
+      if (ev?.delta === true) this.streamed += v;
+      else this.answer = v;
+    } else if (ev?.type === "tool_use" && this.streamed) {
+      // Text before a tool call is commentary; keep only the last turn's text.
+      this.answer = this.streamed;
+      this.streamed = "";
+    }
+    this.use = usageOf(ev) ?? this.use;
+    if (ev?.type === "result" && ev.status && ev.status !== "success") this.failed = true;
     if (ev?.type === "error" || ev?.error) this.errs.push(String(ev.error?.message ?? ev.error ?? ev.message ?? "error"));
   }
   finalAnswer() {
-    return this.mode === "text" ? this.lines.join("\n").trim() : this.answer;
+    return this.mode === "text" ? this.lines.join("\n").trim() : (this.streamed || this.answer).trim();
   }
   usage() {
-    return undefined;
+    return this.use;
   }
   errors() {
     return this.errs;
   }
   completed() {
-    return true;
+    return !this.failed;
   }
+}
+
+/** The answer in a CLI agent's complete stdout, parsed the same way as a real delegation. */
+export function extractAnswer(c: NonNullable<AgentDef["cli"]>, stdout: string): string {
+  if (c.output !== "jsonl") return stdout.trim();
+  const p = new GenericParser("jsonl", c.answerField || undefined);
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      p.onEvent(JSON.parse(line));
+    } catch {
+      /* not JSON */
+    }
+  }
+  return p.finalAnswer() || stdout.trim();
 }
 
 /** Run a registered CLI agent. Exit code 0 = success. */
@@ -96,7 +142,10 @@ export async function runCliAgent(def: AgentDef, task: string, cwd: string, time
   const args = splitArgs(c.args ?? "").map(fill).filter((a) => a !== "");
   if (c.input === "arg" && !(c.args ?? "").includes("{task}")) args.push(task);
   const quote = (a: string) => (/[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
+  const { env, secrets } = freshUserEnv();
   return runAgent({
+    env,
+    secrets,
     agent: def.id,
     command: isScript ? (process.env.ComSpec ?? "cmd.exe") : c.exe,
     args: isScript ? ["/d", "/s", "/c", `""${c.exe}" ${args.map(quote).join(" ")}"`] : args,
@@ -113,7 +162,8 @@ export function cliHealthy(def: AgentDef): Promise<boolean> {
   const cmd = def.cli?.healthCmd?.trim();
   if (!cmd) return Promise.resolve(true);
   const [exe, ...args] = splitArgs(cmd);
-  return new Promise((resolve) => execFile(exe, args, { windowsHide: true, timeout: 20000, shell: /\.(cmd|bat)$/i.test(exe) }, (err) => resolve(!err)));
+  const { env } = freshUserEnv();
+  return new Promise((resolve) => execFile(exe, args, { env, windowsHide: true, timeout: 20000, shell: /\.(cmd|bat)$/i.test(exe) }, (err) => resolve(!err)));
 }
 
 /** Ask the desktop app to run an OpenAI-compatible agent (the app holds the key). */

@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { readBoard } from "../../../../packages/bridge/src/board";
 import path from "node:path";
-import { deepseekKey, locateCodex, locateDsh } from "../../../../packages/bridge/src/locate";
+import { deepseekKey, freshUserEnv, locateCodex, locateDsh } from "../../../../packages/bridge/src/locate";
 import type { CodexModel, EnvStatus, RunOptions } from "../shared/types";
 
 if (process.platform === "win32") app.setAppUserModelId("claude-studio");
@@ -18,7 +18,7 @@ import { loadSettings, saveSettings } from "./settings";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import os from "node:os";
-import { splitArgs, type AgentDef } from "../../../../packages/bridge/src/registry";
+import { extractAnswer, splitArgs, type AgentDef } from "../../../../packages/bridge/src/registry";
 import type { AgentTestResult, Settings } from "../shared/types";
 
 let win: BrowserWindow | null = null;
@@ -82,13 +82,14 @@ async function testAgent(def: AgentDef, apiKey?: string | null): Promise<AgentTe
       let out = "";
       let err = "";
       const q = (a: string) => (/[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
+      const { env } = freshUserEnv(); // pick up an API key the user set after the app started
       const p = isScript
-        ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${c.exe}" ${args.map(q).join(" ")}"`], { cwd: dir, windowsHide: true, windowsVerbatimArguments: true })
-        : spawn(c.exe, args, { cwd: dir, windowsHide: true });
+        ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${c.exe}" ${args.map(q).join(" ")}"`], { cwd: dir, env, windowsHide: true, windowsVerbatimArguments: true })
+        : spawn(c.exe, args, { cwd: dir, env, windowsHide: true });
       const timer = setTimeout(() => {
         execFile("taskkill.exe", ["/PID", String(p.pid), "/T", "/F"], () => {});
-        done(false, "超时（120s）");
-      }, 120000);
+        done(false, "超时（240s）");
+      }, 240000); // cloud CLIs retry on "server busy" before answering
       let finished = false;
       const done = (ok: boolean, e?: string) => {
         if (finished) return;
@@ -99,7 +100,7 @@ async function testAgent(def: AgentDef, apiKey?: string | null): Promise<AgentTe
         } catch {
           /* ignore */
         }
-        resolve({ ok, text: out.trim().slice(-2000), error: e, durationSec: Math.round((Date.now() - started) / 100) / 10 });
+        resolve({ ok, text: extractAnswer(c, out).slice(-2000), error: e, durationSec: Math.round((Date.now() - started) / 100) / 10 });
       };
       p.stdout?.on("data", (d) => (out += d));
       p.stderr?.on("data", (d) => (err += d));

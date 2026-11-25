@@ -68,6 +68,29 @@ export function locateDsh(): string {
 }
 
 /**
+ * process.env plus user environment variables (HKCU\Environment) that were set after this
+ * process started, e.g. an API key the user just added. Existing values are never replaced.
+ * `secrets` = values of key/token-like variables, for scrubbing from logs. Values are never logged.
+ */
+export function freshUserEnv(): { env: NodeJS.ProcessEnv; secrets: string[] } {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  try {
+    const out = execFileSync("reg.exe", ["query", "HKCU\\Environment"], { encoding: "utf8", windowsHide: true, timeout: 10000 });
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/^\s{4}(\S+)\s+REG_SZ\s+(.+)$/);
+      if (!m || /^path$/i.test(m[1]) || env[m[1]] !== undefined) continue;
+      env[m[1]] = m[2].trim();
+    }
+  } catch {
+    /* no registry access: use process.env as is */
+  }
+  const secrets = Object.entries(env)
+    .filter(([k, v]) => /(KEY|TOKEN|SECRET|PASSWORD)/i.test(k) && v && v.length >= 8)
+    .map(([, v]) => v!);
+  return { env, secrets };
+}
+
+/**
  * Return DEEPSEEK_API_KEY from the process env, or read it from HKCU\Environment
  * (user env var set after this process started). The value is never logged.
  */
