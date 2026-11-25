@@ -11,7 +11,8 @@
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc -p .",
-    "dist": "npm --prefix ../../packages/bridge run build && electron-vite build && electron-builder --win nsis --publish never"
+    "dist": "npm --prefix ../../packages/bridge run build && electron-vite build && electron-builder --win nsis --publish never",
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/release.ps1"
   },
   "devDependencies": {
     "@types/node": "^26.6.10",
@@ -43,19 +44,46 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "../../packages/bridge/dist", "to": "bridge/dist" },
-      { "from": "../../packages/bridge/package.json", "to": "bridge/package.json" },
+      {
+        "from": "../../packages/bridge/dist",
+        "to": "bridge/dist"
+      },
+      {
+        "from": "../../packages/bridge/package.json",
+        "to": "bridge/package.json"
+      },
       {
         "from": "../../packages/bridge/node_modules",
         "to": "bridge/node_modules",
-        "filter": ["**/*", "!typescript/**", "!@typescript/**", "!@types/**", "!.bin/**"]
+        "filter": [
+          "**/*",
+          "!typescript/**",
+          "!@typescript/**",
+          "!@types/**",
+          "!.bin/**"
+        ]
       },
-      { "from": "../../CLAUDE.md", "to": "CLAUDE.md" },
-      { "from": "../../config", "to": "config" }
+      {
+        "from": "../../CLAUDE.md",
+        "to": "CLAUDE.md"
+      },
+      {
+        "from": "../../config",
+        "to": "config"
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "WenzhuoFAN",
+        "repo": "claude-studio",
+        "releaseType": "release"
+      }
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": false,
@@ -68,5 +96,8 @@
       "deleteAppDataOnUninstall": false,
       "artifactName": "ClaudeStudio-Setup-${version}.${ext}"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
   }
 }

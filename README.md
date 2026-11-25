@@ -271,6 +271,15 @@ claude-studio/
    - 登录命令：`explorer.exe https://aistudio.google.com/apikey`（打开申请 Key 的页面）
 4. 固定用 flash 模型（`-m gemini-3-flash-preview`）：默认的 auto 会选 pro 模型，免费额度里 pro 的每日配额是 0。
 
+## 自动更新（多台电脑）
+
+安装版（1.1.0 起）每次启动和之后每 4 小时，会到本仓库的 [Releases](https://github.com/WenzhuoFAN/claude-studio/releases) 检查新版本，后台下载好后在窗口顶部提示「新版本已下载」：点「立即重启」马上更新；点「稍后」的话，下次关闭应用时自动安装。设置 → 关于 里也有「检查更新」。
+
+- 1.1.0 之前的版本没有自动更新，需要从 Releases 手动下载安装一次，之后就会自己更新。
+- 只更新程序本身。项目、对话记录、智能体和设置都保存在各自电脑的 `%APPDATA%\Claude 的工作室` 里，不会同步。在新电脑上添加 Gemini 或本地大肥鱼，用设置里的「从模板添加」；Gemini 还需要在那台电脑上安装 Gemini CLI 并设置 `GEMINI_API_KEY`。
+- 安装包没有代码签名，所以更新时不校验发布者签名（`verifyUpdateCodeSignature: false`），只校验 `latest.yml` 里的 SHA-512。
+- 发布新版本（维护者）：`.\scripts\release.ps1 patch`（或 `minor` / `1.2.0`）。脚本会改版本号、打包、提交推送，然后用 `gh release create` 上传安装包、`latest.yml` 和 `.blockmap`。GitHub 登录由 `gh` 自己处理，脚本不读取也不保存 token。
+
 ## 从源码构建
 
 需要 Node.js 22+ 和 Git（只在项目目录里安装依赖，不做全局安装）：

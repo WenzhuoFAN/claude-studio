@@ -187,6 +187,10 @@ export interface MaoApi {
   authAction(agent: string, action: "reopen" | "cancel" | "retry"): Promise<void>;
   listAgents(): Promise<AgentDef[]>;
   agentAvatars(): Promise<Record<string, string>>;
+  getUpdate(): Promise<UpdateStatus>;
+  checkUpdate(): Promise<UpdateStatus>;
+  installUpdate(): Promise<void>;
+  onUpdate(cb: (s: UpdateStatus) => void): () => void;
   saveAgent(def: AgentDef, apiKey?: string | null): Promise<AgentDef>;
   /** Ready-made agents for「从模板添加」; def is null when the tool isn't installed (note says why). */
   agentPresets(): Promise<{ key: string; label: string; note: string; def: AgentDef | null }[]>;
@@ -213,4 +217,14 @@ export interface MaoApi {
   onEvent(cb: (runId: string, ev: RunEvent) => void): () => void;
   onRunsChanged(cb: (runs: RunMeta[]) => void): () => void;
   onSelectRun(cb: (runId: string) => void): () => void;
+}
+
+/** Auto-update state (installed build only). */
+export interface UpdateStatus {
+  state: "idle" | "checking" | "latest" | "downloading" | "ready" | "error";
+  current: string;
+  version?: string;
+  percent?: number;
+  error?: string;
+  checkedAt?: number;
 }

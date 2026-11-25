@@ -15,6 +15,9 @@ import { AuthManager } from "./auth";
 import { AGENTS_FILE, AgentStore } from "./agents";
 import { callOpenAi, startAppServer } from "./appserver";
 import { loadSettings, saveSettings } from "./settings";
+import { Updater } from "./updater";
+
+let updater: Updater;
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import os from "node:os";
@@ -280,6 +283,9 @@ function registerIpc() {
   ipcMain.handle("listAgents", () => agents.all());
   ipcMain.handle("agentAvatars", () => Object.fromEntries(agents.all().map((a) => [a.id, agents.avatarDataUrl(a.id)]).filter(([, v]) => v)));
   ipcMain.handle("agentPresets", () => agentPresets());
+  ipcMain.handle("getUpdate", () => updater.status);
+  ipcMain.handle("checkUpdate", () => updater.check());
+  ipcMain.handle("installUpdate", () => updater.install());
   ipcMain.handle("saveAgent", (_e, def: AgentDef, apiKey?: string | null) => agents.upsert(def, apiKey));
   ipcMain.handle("removeAgent", (_e, id: string) => agents.remove(id));
   ipcMain.handle("setAgentAvatar", (_e, id: string, png: string) => agents.setAvatar(id, png));
@@ -532,8 +538,15 @@ app.whenReady().then(async () => {
   setInterval(() => quota.refreshCodex(), 10 * 60 * 1000);
   projects.on("changed", (list) => win?.webContents.send("projectsChanged", list));
   watchBoards();
+  updater = new Updater();
+  updater.on("changed", (s) => {
+    win?.webContents.send("update", s);
+    // Test hook: MAO_UPDATE_SHOT=<png> captures the window once an update is ready.
+    if (s.state === "ready" && process.env.MAO_UPDATE_SHOT) setTimeout(() => capture(process.env.MAO_UPDATE_SHOT!), 1500);
+  });
   registerIpc();
   createWindow();
+  updater.start();
   win!.webContents.once("did-finish-load", () => setTimeout(autorun, 800));
 });
 

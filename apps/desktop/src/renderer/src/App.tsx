@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import type { Activity, AgentDef, AuthInfo, Board, CodexModel, EnvStatus, MaoApi, Project, Quota, RunEvent, RunMeta, RunOptions, SubQuota } from "../../shared/types";
+import type { Activity, AgentDef, AuthInfo, Board, CodexModel, EnvStatus, MaoApi, Project, Quota, RunEvent, RunMeta, RunOptions, SubQuota, UpdateStatus } from "../../shared/types";
 import { SettingsPage } from "./Settings";
 import { ACT_ICON, AGENT_ORDER, EFFORT_TEXT, deriveCards, deriveLead, fmtSec, fmtTokens, setRegistry, WHO, who, type Activity as WorkerAct, type Card } from "./derive";
 
@@ -10,9 +10,6 @@ const WHO_SHORT: Record<string, string> = { claude: "主管 · 规划 / 审查 /
 import claudeAvatar from "./assets/avatars/claude.png";
 import codexAvatar from "./assets/avatars/codex.png";
 import deepseekAvatar from "./assets/avatars/deepseek.png";
-import claudeFull from "./assets/avatars/full/claude.png";
-import codexFull from "./assets/avatars/full/codex.png";
-import deepseekFull from "./assets/avatars/full/deepseek.png";
 
 declare global {
   interface Window {
@@ -23,17 +20,8 @@ const mao = window.mao;
 
 export const APP_NAME = "Claude 的工作室";
 
-/** Small "v1.0.1" next to the app name, so it is obvious which build is running. */
-function BrandVersion() {
-  const [v, setV] = useState("");
-  useEffect(() => {
-    mao.appInfo().then((i) => setV(`v${i.version}${i.packaged ? "" : " 开发版"}`)).catch(() => {});
-  }, []);
-  return v ? <span className="brand-ver">{v}</span> : null;
-}
 type Who = string;
 export const BUILTIN_AVATARS: Record<string, string> = { claude: claudeAvatar, codex: codexAvatar, deepseek: deepseekAvatar };
-const PORTRAIT: Record<string, string> = { claude: claudeFull, codex: codexFull, deepseek: deepseekFull };
 /** CSS variable carrying the agent's colour (borders, rings, accents). */
 const acc = (id: string) => ({ ["--ac" as any]: who(id).color }) as React.CSSProperties;
 
@@ -388,9 +376,6 @@ function Sidebar(props: {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-title">
-          {APP_NAME} <BrandVersion />
-        </div>
         <div className="presence">
           {["claude", ...AGENT_ORDER].map((w) => {
             const p = presence(w, env, props.activity, props.quota, props.auth ?? undefined);
@@ -609,38 +594,62 @@ function stripVerdict(text: string) {
   return text.replace(/^.*审查结论[:：].*$/gm, "").trim();
 }
 
-function Welcome({ project, hasProjects }: { project: Project | null; hasProjects: boolean }) {
+/** "新版本已下载" banner: restart now, or later (installs when the app is closed). */
+function UpdateBanner() {
+  const [s, setS] = useState<UpdateStatus | null>(null);
+  const [later, setLater] = useState<string | null>(null);
+  useEffect(() => {
+    mao.getUpdate().then(setS);
+    return mao.onUpdate(setS);
+  }, []);
+  if (!s || s.state !== "ready" || later === s.version) return null;
+  return (
+    <div className="banner update">
+      <span>新版本 v{s.version} 已下载，重启即可更新（当前 v{s.current}）。</span>
+      <button className="btn small primary" onClick={() => mao.installUpdate()}>
+        立即重启
+      </button>
+      <button className="btn small" onClick={() => setLater(s.version ?? "")}>
+        稍后
+      </button>
+    </div>
+  );
+}
+
+/** Empty state: a small project picker in the middle, the composer stays at the bottom (like a new Claude Code session). */
+export interface WelcomeProps {
+  projects: Project[];
+  project: Project | null;
+  onPick: (projectId: string) => void;
+  onNewProject: () => void;
+}
+
+function Welcome({ projects, project, onPick, onNewProject }: WelcomeProps) {
   return (
     <div className="chat empty">
-      <div className="welcome">
-        <div className="portraits">
-          {(["codex", "claude", "deepseek"] as Who[]).map((w) => (
-            <figure key={w} className={"portrait " + w}>
-              <img src={PORTRAIT[w]} alt={who(w).name} draggable={false} />
-              <figcaption>
-                <b>{who(w).name}</b>
-                <span>{WHO_SHORT[w] ?? who(w).role}</span>
-              </figcaption>
-            </figure>
+      <div className="welcome-min">
+        <img className="mascot" src={BUILTIN_AVATARS.claude} alt="" draggable={false} />
+        <div className="wcard">
+          {projects.map((p) => (
+            <button key={p.id} className={"wrow" + (project?.id === p.id ? " on" : "")} title={p.folder} onClick={() => onPick(p.id)}>
+              <span className="wicon">📁</span>
+              <span className="wname">{p.name}</span>
+              <span className="wfolder">{p.folder}</span>
+              {project?.id === p.id && <span className="wcheck">✓</span>}
+            </button>
           ))}
+          <button className="wrow add" onClick={onNewProject}>
+            <span className="wicon">＋</span>
+            <span className="wname">新项目</span>
+          </button>
         </div>
-        {project ? (
-          <>
-            <h2>在「{project.name}」里开始新对话</h2>
-            <p>Claude 是主管：拆分任务，把实现交给 Codex，把测试和文档交给 DeepSeek，然后逐个审查、跑测试，最后汇报谁做了什么。所有文件都在 {project.folder}。</p>
-          </>
-        ) : (
-          <>
-            <h2>{hasProjects ? "选一个项目，开始新对话" : "先新建一个项目"}</h2>
-            <p>{hasProjects ? "在左侧点项目旁边的「＋」或「＋ 新对话」。" : "点左上角「＋ 新项目」，起个名字、选一个文件夹（空文件夹也可以）。之后这个项目的所有对话都在这个文件夹里工作。"}</p>
-          </>
-        )}
+        <p className="whint">{project ? `在下面描述任务，Claude 会在「${project.name}」里开始工作` : projects.length ? "选一个项目，然后在下面描述任务" : "先新建一个项目：起个名字，选一个文件夹"}</p>
       </div>
     </div>
   );
 }
 
-function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta | null; project: Project | null; hasProjects: boolean; authWait?: (id: string) => boolean }) {
+function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta | null; project: Project | null; welcome: Omit<WelcomeProps, "project">; authWait?: (id: string) => boolean }) {
   const items = useMemo(() => buildChat(props.events), [props.events]);
   const now = useNow(props.running);
   const ref = useRef<HTMLDivElement>(null);
@@ -657,7 +666,7 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  if (!props.meta) return <Welcome project={props.project} hasProjects={props.hasProjects} />;
+  if (!props.meta) return <Welcome {...props.welcome} project={props.project} />;
 
   return (
     <div className="chat" ref={ref} onScroll={onScroll}>
@@ -1319,6 +1328,17 @@ function AppInner() {
     setError(null);
   };
 
+  const openNewProject = () =>
+    setModal(
+      <NewProjectModal
+        onClose={() => setModal(null)}
+        onCreated={(p) => {
+          setModal(null);
+          newConversation(p.id);
+        }}
+      />,
+    );
+
   const meta = runs.find((r) => r.id === selected) ?? null;
   const projectId = meta?.projectId ?? (sel?.kind === "new" ? sel.projectId : null);
   const project = projects.find((p) => p.id === projectId) ?? null;
@@ -1371,7 +1391,7 @@ function AppInner() {
     );
 
   const placeholder = !project
-    ? "先在左侧选择或新建一个项目"
+    ? "先在上面选一个项目，或新建一个"
     : isNew
       ? "描述你的任务，例如：用 TypeScript 写一个命令行待办事项工具，支持 add/list/done，并配上单元测试"
       : running
@@ -1390,17 +1410,7 @@ function AppInner() {
         sel={sel}
         onSelectRun={selectRun}
         onNewConversation={newConversation}
-        onNewProject={() =>
-          setModal(
-            <NewProjectModal
-              onClose={() => setModal(null)}
-              onCreated={(p) => {
-                setModal(null);
-                newConversation(p.id);
-              }}
-            />,
-          )
-        }
+        onNewProject={openNewProject}
         onRename={(p) => setModal(<RenameModal project={p} onClose={() => setModal(null)} />)}
         onSettings={() => setShowSettings(true)}
         onRemove={removeProject}
@@ -1427,7 +1437,8 @@ function AppInner() {
         </header>
         <EnvBanner env={env} onRefresh={refreshEnv} />
         <AuthBanner auth={auth} />
-        <ChatView events={events} running={running} meta={meta} project={project} hasProjects={projects.length > 0} authWait={(id) => !!auth?.[id] && auth[id].state !== "ok"} />
+        <UpdateBanner />
+        <ChatView events={events} running={running} meta={meta} project={project} welcome={{ projects, onPick: newConversation, onNewProject: openNewProject }} authWait={(id) => !!auth?.[id] && auth[id].state !== "ok"} />
         <div className="composer">
           {error && <div className="composer-error">⚠ {error}</div>}
           {othersRunning.length > 0 && !running && (

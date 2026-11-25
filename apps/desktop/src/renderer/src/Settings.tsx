@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AgentDef, AgentTestResult, AppInfo, CodexModel, MaoApi, Quota, Settings } from "../../shared/types";
+import type { AgentDef, AgentTestResult, AppInfo, CodexModel, MaoApi, Quota, Settings, UpdateStatus } from "../../shared/types";
 import { EFFORT_TEXT, who } from "./derive";
 import { Avatar, DeepseekBalance, QuotaLine } from "./App";
 import geminiAvatar from "./assets/avatars/gemini.png";
@@ -74,6 +74,37 @@ function Presets({ agents }: { agents: AgentDef[] }) {
         </button>
       ))}
       {msg && <div className="muted small">{msg}</div>}
+    </div>
+  );
+}
+
+/** 设置 → 关于: update state and a 「检查更新」 button. */
+function UpdateRow() {
+  const [s, setS] = useState<UpdateStatus | null>(null);
+  useEffect(() => {
+    mao.getUpdate().then(setS);
+    return mao.onUpdate(setS);
+  }, []);
+  if (!s) return null;
+  const text: Record<UpdateStatus["state"], string> = {
+    idle: "",
+    checking: "正在检查…",
+    latest: "已是最新版本",
+    downloading: `正在下载 v${s.version ?? ""}（${s.percent ?? 0}%）`,
+    ready: `v${s.version} 已下载，重启即可更新`,
+    error: `检查失败：${s.error ?? ""}`,
+  };
+  return (
+    <div className="update-row">
+      <button className="btn small" disabled={s.state === "checking" || s.state === "downloading"} onClick={() => mao.checkUpdate().then(setS)}>
+        检查更新
+      </button>
+      {s.state === "ready" && (
+        <button className="btn small primary" onClick={() => mao.installUpdate()}>
+          立即重启并更新
+        </button>
+      )}
+      <span className={"small " + (s.state === "error" ? "bad-text" : "muted")}>{text[s.state]}</span>
     </div>
   );
 }
@@ -519,6 +550,8 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
               Claude 的工作室 v{info.version}（{info.packaged ? "安装版" : "开发版"}） · Electron {info.electron}
             </p>
           )}
+          <UpdateRow />
+          <p className="muted small">安装版每次启动和之后每 4 小时会到 GitHub 检查新版本，后台下载好后提示重启。只更新程序本身；项目、对话、智能体和设置留在各自的电脑上。</p>
         </section>
       </div>
       {editing && <AgentEditor initial={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
