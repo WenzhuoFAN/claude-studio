@@ -4,7 +4,8 @@ import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import type { Activity, RunEvent, RunEventBody, RunMeta, RunOptions, Worker } from "../shared/types";
+import type { Activity, Attachment, RunEvent, RunEventBody, RunMeta, RunOptions, Worker } from "../shared/types";
+import { adopt, runAttachDir } from "./attachments";
 import { ALLOWED_TOOLS, BRIDGE, CLAUDE_MD, ROOT, RUNS, boardPath, locateClaude } from "./paths";
 import { WorkerTail } from "./workers";
 import { withBoard, type ConvState } from "../../../../packages/bridge/src/board";
@@ -63,8 +64,8 @@ export interface RunContext {
 }
 
 /** Team roster for the lead, built from the registry at spawn time (so CLAUDE.md never needs editing). */
-function teamRoster(agents: AgentDef[]): string {
-  const on = agents.filter((a) => a.enabled);
+function teamRoster(agents: AgentDef[], dshCommands: boolean): string {
+  const on = agents.filter((a) => a.enabled).map((a) => (a.builtin === "deepseek" && !dshCommands ? { ...a, canRun: false } : a));
   if (!on.length) return "";
   const lines = on.map((a) => {
     const how = a.builtin === "codex" ? "工具 delegate_to_codex（或 delegate_to_agent）" : a.builtin === "deepseek" ? "工具 delegate_to_deepseek（或 delegate_to_agent）" : `工具 delegate_to_agent，agentId="${a.id}"`;
@@ -85,6 +86,22 @@ const GUI_RULES = `
 - 每次 Bash/PowerShell 调用只写一条命令；不要用 ; && || 管道 | 、if ($?)、$LASTEXITCODE、$env: 赋值、heredoc，这些会被直接拒绝。
 - 创建或修改文件用 Write / Edit 工具，不要用 shell 写文件。
 - 想知道退出码就单独运行那条命令，工具结果里会显示是否出错。`;
+
+const ATTACH_RULES = `
+[附件] 用户可能在消息里附带图片或文件。它们保存在下面的附件文件夹里（应用数据目录，不在项目文件夹里），你可以用 Read 读取（含图片、PDF）。
+- 不要修改或删除附件；需要把附件放进项目时，先问用户或在回复里说明。
+- 委派时如果执行者需要附件：在 task 里写明附件的绝对路径。Codex 和 DeepSeek 能读这个文件夹；给 Codex 看图片时把图片路径放进 delegate_to_codex 的 images 参数。
+- 其他智能体（API 类、其他命令行工具）不一定能读到这个文件夹：把它们需要的内容（文字、你对图片的描述）直接写进 task。`;
+
+const DSH_RULES = `
+[DeepSeek 跑命令] DeepSeek 可以在 Windows 沙箱里运行命令（只能写工作目录和附件文件夹），每条命令都经过监管：
+- 委派结果末尾的 "commands run" 列出了它跑的每条命令：✓ allow 正常、❓ review 需要你复查（联网、安装、工作目录以外的路径等）、⛔ block 已拦截（DeepSeek 当场被终止）。
+- 审查每个 DeepSeek 结果时必须看这份命令清单；发现可疑命令（哪怕是 ✓/❓）要在回复里单独一行告诉用户：「⚠ DeepSeek 命令提醒：…」。
+- DeepSeek 的沙箱不允许带 IPC 的子进程（fork）：node 自带测试要用 \`node --test --experimental-test-isolation=none\`；jest / vitest 等测试框架在它那里可能报 spawn EPERM，这时由你来跑测试。
+- 被拦截的命令不要换个方式再跑（不要自己跑、也不要让别的执行者跑）；确实需要时先问用户。
+- 结果里出现 SANDBOX_ACL 表示这个项目文件夹还没给 DeepSeek 的沙箱授权：告诉用户在 DeepSeek 卡片上点「授予 DeepSeek 沙箱权限」，在那之前需要跑命令的步骤交给 Codex 或你自己。`;
+
+const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 function killTree(pid?: number) {
   if (pid) execFile("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
@@ -262,24 +279,25 @@ export class RunManager extends EventEmitter {
     if (m && m.projectId !== projectId) this.saveMeta({ ...m, projectId });
   }
 
-  start(task: string, workdir: string, projectId: string, options: RunOptions): RunMeta {
+  start(task: string, workdir: string, projectId: string, options: RunOptions, attachments?: Attachment[]): RunMeta {
     const id = newId();
     mkdirSync(this.dir(id), { recursive: true });
     mkdirSync(workdir, { recursive: true });
-    const meta: RunMeta = { id, title: clip(task, 60), workdir, projectId, options, startedAt: Date.now(), status: "running" };
+    const meta: RunMeta = { id, title: clip(task || `附件：${(attachments ?? []).map((a) => a.name).join("、")}`, 60), workdir, projectId, options, startedAt: Date.now(), status: "running" };
     this.saveMeta(meta);
-    this.spawnClaude(id, task, true);
+    this.spawnClaude(id, task, true, adopt(id, attachments));
     return meta;
   }
 
   /** Follow-up message in the same conversation (claude --resume). */
-  send(id: string, text: string) {
+  send(id: string, text: string, attachments?: Attachment[]) {
     const m = this.meta(id);
     if (!m) throw new Error("没有这个任务");
     if (this.active.has(id)) throw new Error("任务仍在运行，请等它结束或先停止");
     if (!m.sessionId) throw new Error("这个任务没有可继续的会话");
+    if (!text.trim() && !attachments?.length) throw new Error("消息不能为空");
     this.saveMeta({ ...m, status: "running", endedAt: undefined });
-    this.spawnClaude(id, text, false);
+    this.spawnClaude(id, text, false, adopt(id, attachments));
   }
 
   stop(id: string) {
@@ -293,10 +311,10 @@ export class RunManager extends EventEmitter {
     for (const id of this.active.keys()) this.stop(id);
   }
 
-  private spawnClaude(id: string, text: string, first: boolean) {
+  private spawnClaude(id: string, text: string, first: boolean, files: Attachment[] = []) {
     const meta = this.meta(id)!;
     const claude = locateClaude();
-    this.push(id, { k: "user", text });
+    this.push(id, files.length ? { k: "user", text, attachments: files } : { k: "user", text });
     if (!claude) {
       this.push(id, { k: "stderr", text: "找不到 claude.exe。请确认 Claude Code 已安装，或设置环境变量 CLAUDE_PATH。" });
       this.push(id, { k: "exit", code: null, stopped: false });
@@ -304,6 +322,7 @@ export class RunManager extends EventEmitter {
       return;
     }
     const runDir = this.dir(id);
+    const attDir = runAttachDir(id);
     // Per-run MCP config: absolute bridge path, worker logs go into this run's folder.
     const mcpFile = path.join(runDir, "mcp.json");
     writeFileSync(
@@ -331,6 +350,8 @@ export class RunManager extends EventEmitter {
               MAO_APP_TOKEN: this.ctx.appToken,
               ...(meta.options?.codexModel ? { MAO_CODEX_MODEL: meta.options.codexModel } : {}),
               ...(meta.options?.codexEffort ? { MAO_CODEX_EFFORT: meta.options.codexEffort } : {}),
+              ...(existsSync(attDir) ? { MAO_ATTACH_DIR: attDir } : {}),
+              MAO_DSH_COMMANDS: this.ctx.settings().dshCommands === false ? "0" : "1",
             },
           },
         },
@@ -339,22 +360,52 @@ export class RunManager extends EventEmitter {
     const allowed: string[] = JSON.parse(readFileSync(ALLOWED_TOOLS, "utf8"));
     const args = ["-p", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile, "--strict-mcp-config", "--permission-mode", "dontAsk", "--allowedTools", ...allowed];
     if (!first && meta.sessionId) args.push("--resume", meta.sessionId);
+    // Per-conversation choice (composer), else 设置 (conversations from before 1.1.1 have no choice stored).
     const st = this.ctx.settings();
-    if (st.claudeModel) args.push("--model", st.claudeModel);
-    if (st.claudeEffort) args.push("--effort", st.claudeEffort);
+    const o = meta.options;
+    const model = o && o.claudeModel !== undefined ? o.claudeModel : st.claudeModel;
+    const effort = o && o.claudeEffort !== undefined ? o.claudeEffort : st.claudeEffort;
+    if (model) args.push("--model", model);
+    if (effort) args.push("--effort", effort);
+    // Earlier and current attachments of this conversation are readable (Read tool) on every turn.
+    if (existsSync(attDir)) args.push("--add-dir", attDir);
+    // Images go in as real image content: one stream-json user message instead of a plain-text prompt.
+    const images = files.filter((f) => f.image);
+    if (images.length) args.push("--input-format", "stream-json");
 
     const inRepo = (path.resolve(meta.workdir) + path.sep).toLowerCase().startsWith((path.resolve(ROOT) + path.sep).toLowerCase());
-    let sys = GUI_RULES + teamRoster(this.ctx.agents());
+    let sys = GUI_RULES + teamRoster(this.ctx.agents(), st.dshCommands !== false);
+    if (st.dshCommands !== false) sys += "\n" + DSH_RULES;
     if (meta.projectId) sys += "\n" + COLLAB_RULES + `\n你的对话编号：${meta.id}`;
     if (meta.options?.splitSmall) sys += "\n" + SPLIT_RULE;
     if (meta.options?.codexModel || meta.options?.codexEffort)
       sys += `\n[Codex 设置] 用户已为 Codex 选定模型 ${meta.options.codexModel || "默认"}、推理强度 ${meta.options.codexEffort || "默认"}；调用 delegate_to_codex 时不要传 model / reasoningEffort 参数。`;
+    if (existsSync(attDir)) sys += "\n" + ATTACH_RULES + `\n本对话的附件文件夹：${attDir}`;
     if (!inRepo) sys = readFileSync(CLAUDE_MD, "utf8") + "\n" + sys;
     args.push("--append-system-prompt", sys);
 
+    const attachNote = files.length
+      ? `\n\n[附件] 用户随这条消息附带了 ${files.length} 个文件（已复制到应用的附件文件夹，不在项目里）${images.length ? "；图片已直接附在这条消息里" : ""}：\n` +
+        files.map((f) => `- ${f.name}（${fmtSize(f.size)}${f.image ? "，图片" : ""}）：${f.path}`).join("\n") +
+        (files.some((f) => !f.image) ? "\n需要时用 Read 工具读取这些文件（PDF 也可以直接 Read）。" : "")
+      : "";
+    const body = (text.trim() || "（见附件）") + attachNote;
     const prompt = first
-      ? `${text}\n\n工作目录（所有文件都放在这里；委派时 cwd 一律用这个绝对路径）：${meta.workdir}\n请按 CLAUDE.md 的分工规则执行：先规划，再委派给 Codex / DeepSeek，逐个审查结果并运行测试，最后给出分工总结。`
-      : text;
+      ? `${body}\n\n工作目录（所有文件都放在这里；委派时 cwd 一律用这个绝对路径）：${meta.workdir}\n请按 CLAUDE.md 的分工规则执行：先规划，再委派给 Codex / DeepSeek，逐个审查结果并运行测试，最后给出分工总结。`
+      : body;
+    let stdinText = prompt;
+    if (images.length) {
+      const content: any[] = [];
+      for (const f of images) {
+        try {
+          content.push({ type: "image", source: { type: "base64", media_type: f.mime, data: readFileSync(f.path).toString("base64") } });
+        } catch {
+          /* unreadable now: the path in the text still points at it */
+        }
+      }
+      content.push({ type: "text", text: prompt });
+      stdinText = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+    }
 
     const child = spawn(claude, args, {
       cwd: meta.workdir,
@@ -520,6 +571,6 @@ export class RunManager extends EventEmitter {
       });
     });
     child.stdin!.on("error", () => {});
-    child.stdin!.end(prompt, "utf8");
+    child.stdin!.end(stdinText, "utf8");
   }
 }

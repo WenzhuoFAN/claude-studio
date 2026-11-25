@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import type { Activity, AgentDef, AuthInfo, Board, CodexModel, EnvStatus, MaoApi, Project, Quota, RunEvent, RunMeta, RunOptions, SubQuota, UpdateStatus } from "../../shared/types";
+import type { Activity, AgentDef, Attachment, AuthInfo, Settings, StageResult, Board, CodexModel, EnvStatus, MaoApi, Project, Quota, RunEvent, RunMeta, RunOptions, SubQuota, UpdateStatus } from "../../shared/types";
 import { SettingsPage } from "./Settings";
 import { ACT_ICON, AGENT_ORDER, EFFORT_TEXT, deriveCards, deriveLead, fmtSec, fmtTokens, setRegistry, WHO, who, type Activity as WorkerAct, type Card } from "./derive";
 
@@ -649,6 +649,66 @@ function Welcome({ projects, project, onPick, onNewProject }: WelcomeProps) {
   );
 }
 
+// ------------------------------------------------------------------ attachments
+const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const previewCache = new Map<string, Promise<string | null>>();
+const previewOf = (p: string) => {
+  let v = previewCache.get(p);
+  if (!v) previewCache.set(p, (v = mao.attachmentPreview(p)));
+  return v;
+};
+
+function Thumb({ a, onOpen }: { a: Attachment; onOpen: (src: string) => void }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    previewOf(a.path).then((s) => live && setSrc(s));
+    return () => {
+      live = false;
+    };
+  }, [a.path]);
+  return src ? <img className="att-thumb" src={src} alt={a.name} title={`${a.name}（${fmtSize(a.size)}）— 点击放大`} onClick={() => onOpen(src)} /> : <span className="att-thumb ph">🖼</span>;
+}
+
+function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, []);
+  return (
+    <div className="lightbox" onClick={onClose}>
+      <img src={src} alt="" />
+    </div>
+  );
+}
+
+/** Attachments of a message; removable chips in the composer when onRemove is given. */
+function Attachments({ list, onRemove }: { list: Attachment[]; onRemove?: (a: Attachment) => void }) {
+  const [big, setBig] = useState<string | null>(null);
+  return (
+    <div className={"atts" + (onRemove ? " editing" : "")}>
+      {list.map((a) => (
+        <div key={a.path} className={"att" + (a.image ? " img" : "")}>
+          {a.image ? (
+            <Thumb a={a} onOpen={setBig} />
+          ) : (
+            <span className="att-file" title={a.path} onClick={() => !onRemove && mao.openPath(a.path.replace(/[\\/][^\\/]*$/, ""))}>
+              📄 <span className="att-name">{a.name}</span> <span className="att-size">{fmtSize(a.size)}</span>
+            </span>
+          )}
+          {onRemove && (
+            <button className="att-x" title="移除" onClick={() => onRemove(a)}>
+              ×
+            </button>
+          )}
+        </div>
+      ))}
+      {big && <Lightbox src={big} onClose={() => setBig(null)} />}
+    </div>
+  );
+}
+
 function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta | null; project: Project | null; welcome: Omit<WelcomeProps, "project">; authWait?: (id: string) => boolean }) {
   const items = useMemo(() => buildChat(props.events), [props.events]);
   const now = useNow(props.running);
@@ -675,7 +735,10 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
           case "user":
             return (
               <div key={i} className="msg user">
-                <div className="bubble">{it.ev.text}</div>
+                <div className="bubble">
+                  {it.ev.attachments?.length ? <Attachments list={it.ev.attachments} /> : null}
+                  {it.ev.text}
+                </div>
               </div>
             );
           case "text": {
@@ -848,7 +911,42 @@ export function DeepseekBalance({ q }: { q?: Quota["deepseek"] }) {
   );
 }
 
-function CardView({ c, now, quota, convRunning, authWait }: { c: Card; now: number; quota: Quota; convRunning: boolean; authWait?: boolean }) {
+function SandboxGrant({ projectId }: { projectId?: string }) {
+  const [st, setSt] = useState<"idle" | "busy" | "ok" | "err">("idle");
+  const [msg, setMsg] = useState("");
+  if (!projectId) return null;
+  return (
+    <div className="sandbox-grant">
+      {st === "ok" ? (
+        <span className="ok">✓ {msg}。让 Claude 重新委派就能跑命令了。</span>
+      ) : (
+        <>
+          <button
+            className="btn small"
+            disabled={st === "busy"}
+            title="给当前 Windows 用户这个项目文件夹的「完全控制」权限（icacls /grant），DeepSeek 的沙箱需要它；不影响其他文件夹"
+            onClick={async () => {
+              setSt("busy");
+              try {
+                const r = await mao.grantSandbox(projectId);
+                setSt(r.ok ? "ok" : "err");
+                setMsg(r.output);
+              } catch (e) {
+                setSt("err");
+                setMsg(cleanError(e));
+              }
+            }}
+          >
+            {st === "busy" ? "授予中…" : "授予 DeepSeek 沙箱权限"}
+          </button>
+          {st === "err" && <span className="err"> {msg}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CardView({ c, now, quota, convRunning, authWait, projectId }: { c: Card; now: number; quota: Quota; convRunning: boolean; authWait?: boolean; projectId?: string }) {
   const elapsed = c.durationSec ?? ((c.endedAt ?? now) - c.startedAt) / 1000;
   const [showFiles, setShowFiles] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -888,7 +986,8 @@ function CardView({ c, now, quota, convRunning, authWait }: { c: Card; now: numb
           <span className={"act " + (authWait ? "error" : (last?.kind ?? ""))}>{authWait ? "⏸ 等待 Codex 登录，登录后自动继续" : last ? `${ACT_ICON[last.kind]} ${last.text}` : "启动中…"}</span>
         </div>
       )}
-      {c.error && <div className="card-error">{c.error}</div>}
+      {c.error && <div className="card-error">{c.error.replace(/^[sS]*?SANDBOX_ACL: /, "")}</div>}
+      {c.who === "deepseek" && /SANDBOX_ACL/.test(c.error ?? "") && <SandboxGrant projectId={projectId} />}
       <div className="card-links">
         {c.activity.length > 0 && (
           <button className="linkbtn" onClick={() => setShowLog(!showLog)}>
@@ -1170,9 +1269,11 @@ function Panel(props: { meta: RunMeta | null; project: Project | null; events: R
             </div>
             {m.options && (
               <div className="summary-row">
+                {m.options.claudeModel !== undefined && <span className="tag">Claude 模型 {CLAUDE_MODEL_TEXT[m.options.claudeModel] ?? (m.options.claudeModel || "默认")}</span>}
+                {m.options.claudeEffort && <span className="tag">Claude 思考 {EFFORT_TEXT[m.options.claudeEffort] ?? m.options.claudeEffort}</span>}
                 {m.options.splitSmall && <span className="tag">拆小任务</span>}
                 <span className="tag">Codex 模型 {m.options.codexModel || "默认"}</span>
-                {m.options.codexEffort && <span className="tag">推理 {EFFORT_TEXT[m.options.codexEffort] ?? m.options.codexEffort}</span>}
+                {m.options.codexEffort && <span className="tag">Codex 推理 {EFFORT_TEXT[m.options.codexEffort] ?? m.options.codexEffort}</span>}
               </div>
             )}
             {lead.model && <div className="muted small">Claude 模型 {lead.model} · {lead.mcp}</div>}
@@ -1184,7 +1285,7 @@ function Panel(props: { meta: RunMeta | null; project: Project | null; events: R
             <>
               {cards.length === 0 && <div className="empty-small pad">{props.running ? "还没有委派，Claude 正在规划…" : "这个对话没有委派。"}</div>}
               {cards.map((c) => (
-                <CardView key={c.id} c={c} now={now} quota={props.quota} convRunning={props.running} authWait={!!props.auth?.[c.who] && props.auth[c.who].state !== "ok"} />
+                <CardView key={c.id} c={c} now={now} quota={props.quota} projectId={props.meta?.projectId} convRunning={props.running} authWait={!!props.auth?.[c.who] && props.auth[c.who].state !== "ok"} />
               ))}
             </>
           )}
@@ -1196,6 +1297,10 @@ function Panel(props: { meta: RunMeta | null; project: Project | null; events: R
 
 // ------------------------------------------------------------------ options
 const DEFAULT_OPTS: RunOptions = { splitSmall: false, codexModel: "", codexEffort: "" };
+const CLAUDE_MODELS = ["opus", "sonnet", "fable", "haiku"];
+const CLAUDE_MODEL_TEXT: Record<string, string> = { opus: "Opus", sonnet: "Sonnet", fable: "Fable", haiku: "Haiku" };
+const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const optsFromSettings = (s: Settings): RunOptions => ({ splitSmall: s.splitSmall, codexModel: s.codexModel, codexEffort: s.codexEffort, claudeModel: s.claudeModel, claudeEffort: s.claudeEffort });
 
 function loadOpts(): RunOptions {
   try {
@@ -1210,6 +1315,28 @@ function OptionsRow({ opts, setOpts, models }: { opts: RunOptions; setOpts: (o: 
   const efforts = model?.efforts ?? ["low", "medium", "high", "xhigh"];
   return (
     <div className="options">
+      <label className="sel" title="主管 Claude 用的模型；默认值在 设置 → 默认选项">
+        Claude 模型
+        <select value={opts.claudeModel ?? ""} onChange={(e) => setOpts({ ...opts, claudeModel: e.target.value })}>
+          <option value="">默认（Claude Code 设置）</option>
+          {[...new Set([...CLAUDE_MODELS, ...(opts.claudeModel ? [opts.claudeModel] : [])])].map((m) => (
+            <option key={m} value={m}>
+              {CLAUDE_MODEL_TEXT[m] ?? m}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="sel" title="Claude 的思考等级（--effort）">
+        Claude 思考
+        <select value={opts.claudeEffort ?? ""} onChange={(e) => setOpts({ ...opts, claudeEffort: e.target.value })}>
+          <option value="">默认</option>
+          {CLAUDE_EFFORTS.map((x) => (
+            <option key={x} value={x}>
+              {EFFORT_TEXT[x] ?? x}
+            </option>
+          ))}
+        </select>
+      </label>
       <label className="check" title="让 Claude 把 Codex 的工作拆成几分钟能完成的小单元，每个单元审查通过后再委派下一个">
         <input type="checkbox" checked={opts.splitSmall} onChange={(e) => setOpts({ ...opts, splitSmall: e.target.checked })} />
         把任务拆小
@@ -1249,6 +1376,8 @@ function AppInner() {
   const [sel, setSel] = useState<Selection>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [draft, setDraft] = useState("");
+  const [att, setAtt] = useState<Attachment[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [opts, setOptsState] = useState<RunOptions>(loadOpts);
@@ -1296,9 +1425,19 @@ function AppInner() {
     mao.getAuth().then(setAuth);
     loadAgents();
     // New conversations start from the defaults in 设置 unless the user changed them here before.
-    if (!localStorage.getItem("runOptions"))
-      mao.getSettings().then((s) => setOptsState({ splitSmall: s.splitSmall, codexModel: s.codexModel, codexEffort: s.codexEffort }));
+    // (Choices saved before 1.1.1 have no Claude fields: take those from 设置.)
+    mao.getSettings().then((s) =>
+      setOptsState((o) => (!localStorage.getItem("runOptions") ? optsFromSettings(s) : { ...o, claudeModel: o.claudeModel ?? s.claudeModel, claudeEffort: o.claudeEffort ?? s.claudeEffort })),
+    );
+    // Dropping a file anywhere else must not navigate the window to it.
+    const stopDrop = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    window.addEventListener("dragover", stopDrop);
+    window.addEventListener("drop", stopDrop);
     const offs = [
+      () => window.removeEventListener("dragover", stopDrop),
+      () => window.removeEventListener("drop", stopDrop),
       mao.onAgentsChanged((l) => loadAgents(l)),
       mao.onAuth(setAuth),
       mao.onActivity(setActivity),
@@ -1347,20 +1486,52 @@ function AppInner() {
   const isNew = !meta || !meta.sessionId;
   const othersRunning = runs.filter((r) => r.projectId && r.projectId === projectId && r.status === "running" && r.id !== meta?.id);
 
+  const addStaged = (r: StageResult) => {
+    if (r.files.length) setAtt((l) => [...l, ...r.files]);
+    setError(r.errors.length ? r.errors.join("；") : null);
+  };
+  /** Pasted or dropped File objects: by path when they have one (Explorer), else their bytes (screenshots). */
+  const addFiles = async (files: File[]) => {
+    if (!files.length) return;
+    const paths: string[] = [];
+    const res: StageResult = { files: [], errors: [] };
+    for (const f of files) {
+      const p = mao.pathForFile(f);
+      if (p) paths.push(p);
+      else if (f.size > 50 * 1024 * 1024) res.errors.push(`「${f.name || "粘贴的内容"}」太大了`);
+      else {
+        const r = await mao.stageBlob(f.name, f.type, new Uint8Array(await f.arrayBuffer()));
+        res.files.push(...r.files);
+        res.errors.push(...r.errors);
+      }
+    }
+    if (paths.length) {
+      const r = await mao.stageFiles(paths);
+      res.files.push(...r.files);
+      res.errors.push(...r.errors);
+    }
+    addStaged(res);
+  };
+  const canAttach = !!project && !running;
+  // The latest DeepSeek result of this conversation says its sandbox could not be prepared in the project folder.
+  const lastDs = [...events].reverse().find((e) => e.k === "delegate_result" && e.who === "deepseek");
+  const needGrant = !!lastDs && lastDs.k === "delegate_result" && /SANDBOX_ACL/.test(lastDs.error ?? "");
+
   const send = async () => {
     const text = draft.trim();
-    if (!text || busy) return;
+    if ((!text && !att.length) || busy) return;
     setError(null);
     setBusy(true);
     try {
       if (!isNew && !running) {
-        await mao.sendMessage(meta!.id, text);
+        await mao.sendMessage(meta!.id, text, att);
       } else if (isNew) {
         if (!project) throw new Error("请先在左侧选择或新建一个项目");
-        const m = await mao.startRun(text, project.id, opts);
+        const m = await mao.startRun(text, project.id, opts, att);
         await selectRun(m.id);
       }
       setDraft("");
+      setAtt([]);
     } catch (e) {
       setError(cleanError(e));
     } finally {
@@ -1439,7 +1610,22 @@ function AppInner() {
         <AuthBanner auth={auth} />
         <UpdateBanner />
         <ChatView events={events} running={running} meta={meta} project={project} welcome={{ projects, onPick: newConversation, onNewProject: openNewProject }} authWait={(id) => !!auth?.[id] && auth[id].state !== "ok"} />
-        <div className="composer">
+        <div
+          className={"composer" + (dragOver ? " drag" : "")}
+          onDragOver={(e) => {
+            if (!canAttach || !e.dataTransfer.types.includes("Files")) return;
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            if (canAttach) addFiles(Array.from(e.dataTransfer.files));
+          }}
+        >
           {error && <div className="composer-error">⚠ {error}</div>}
           {othersRunning.length > 0 && !running && (
             <div className="composer-warn">
@@ -1447,12 +1633,25 @@ function AppInner() {
               Claude 会先查看项目看板、占用要改的文件；如果和别的对话冲突，由 Claude 判断优先级（排队、先做别的或协商），决定会显示在右侧「项目动态」里。
             </div>
           )}
+          {needGrant && project && (
+            <div className="composer-warn">
+              ⚠ DeepSeek 的沙箱在这个项目文件夹里跑不了命令：需要你对 {project.folder} 有「完全控制」权限（其他磁盘上的文件夹常见）。授予后，让 Claude 重新委派即可。
+              <SandboxGrant projectId={project.id} />
+            </div>
+          )}
           {isNew && project && <OptionsRow opts={opts} setOpts={setOpts} models={models} />}
+          {att.length > 0 && <Attachments list={att} onRemove={(a) => setAtt((l) => l.filter((x) => x.path !== a.path))} />}
           <textarea
             value={draft}
             disabled={running || !project}
             placeholder={placeholder}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files);
+              if (!files.length || !canAttach) return;
+              e.preventDefault();
+              addFiles(files);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
@@ -1461,13 +1660,16 @@ function AppInner() {
             }}
           />
           <div className="composer-actions">
-            <span className="hint">Ctrl+Enter 发送</span>
+            <button className="btn attach" disabled={!canAttach} title="添加图片或文件（也可以直接 Ctrl+V 粘贴或拖进来；图片 ≤20 MB，文件 ≤50 MB）" onClick={() => mao.pickAttachments().then(addStaged)}>
+              📎
+            </button>
+            <span className="hint">Ctrl+Enter 发送 · 可粘贴/拖入图片和文件</span>
             {running ? (
               <button className="btn danger" onClick={() => meta && mao.stopRun(meta.id)}>
                 ■ 停止
               </button>
             ) : (
-              <button className="btn primary" onClick={send} disabled={!draft.trim() || busy}>
+              <button className="btn primary" onClick={send} disabled={(!draft.trim() && !att.length) || busy}>
                 {busy ? "启动中…" : isNew ? "开始" : "继续"}
               </button>
             )}
@@ -1483,7 +1685,7 @@ function AppInner() {
           onClose={() => {
             setShowSettings(false);
             mao.getSettings().then((s) => {
-              if (!localStorage.getItem("runOptions")) setOptsState({ splitSmall: s.splitSmall, codexModel: s.codexModel, codexEffort: s.codexEffort });
+              if (!localStorage.getItem("runOptions")) setOptsState(optsFromSettings(s));
             });
           }}
         />

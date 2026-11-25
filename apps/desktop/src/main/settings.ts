@@ -12,6 +12,7 @@ export const DEFAULT_SETTINGS: Settings = {
   codexModel: "",
   codexEffort: "",
   splitSmall: false,
+  dshCommands: true,
   delegateTimeoutSec: 900,
   loginWaitSec: 600,
 };

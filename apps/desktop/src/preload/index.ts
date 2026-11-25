@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { MaoApi } from "../shared/types";
 
 const on = (channel: string, cb: (...a: any[]) => void) => {
@@ -46,8 +46,21 @@ const api: MaoApi = {
   refreshBalance: () => ipcRenderer.invoke("refreshBalance"),
   onQuota: (cb) => on("quota", cb),
   onActivity: (cb) => on("activity", cb),
-  startRun: (task, projectId, options) => ipcRenderer.invoke("startRun", task, projectId, options),
-  sendMessage: (id, text) => ipcRenderer.invoke("sendMessage", id, text),
+  startRun: (task, projectId, options, attachments) => ipcRenderer.invoke("startRun", task, projectId, options, attachments),
+  sendMessage: (id, text, attachments) => ipcRenderer.invoke("sendMessage", id, text, attachments),
+  stageFiles: (paths) => ipcRenderer.invoke("stageFiles", paths),
+  stageBlob: (name, mime, data) => ipcRenderer.invoke("stageBlob", name, mime, data),
+  pickAttachments: () => ipcRenderer.invoke("pickAttachments"),
+  attachmentPreview: (p) => ipcRenderer.invoke("attachmentPreview", p),
+  sandboxAccess: (projectId) => ipcRenderer.invoke("sandboxAccess", projectId),
+  grantSandbox: (projectId) => ipcRenderer.invoke("grantSandbox", projectId),
+  pathForFile: (f) => {
+    try {
+      return webUtils.getPathForFile(f);
+    } catch {
+      return "";
+    }
+  },
   stopRun: (id) => ipcRenderer.invoke("stopRun", id),
   openPath: (p) => ipcRenderer.invoke("openPath", p),
   openRunLogs: (id) => ipcRenderer.invoke("openRunLogs", id),

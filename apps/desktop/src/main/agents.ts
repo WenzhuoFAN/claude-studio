@@ -30,9 +30,9 @@ export const BUILTINS: AgentDef[] = [
     builtin: "deepseek",
     type: "builtin",
     color: "#5b7cff",
-    role: "更便宜：样板代码、单元测试、文档、第二意见代码评审（本机上不能运行命令）",
+    role: "更便宜：样板代码、单元测试、文档、第二意见代码评审；能在沙箱里跑构建/测试命令（受 Claude 监管）",
     canEdit: true,
-    canRun: false,
+    canRun: true,
     enabled: true,
   },
 ];
@@ -78,6 +78,12 @@ export class AgentStore extends EventEmitter {
     // Built-ins always exist (editable, not deletable); keep the user's edits.
     for (const b of BUILTINS) if (!list.some((a) => a.id === b.id)) list.push({ ...b });
     for (const a of list) if (a.builtin) a.type = "builtin";
+    // 1.1.1: DeepSeek runs commands now (sandboxed, supervised). Update the old default description.
+    const ds = list.find((a) => a.builtin === "deepseek");
+    if (ds) {
+      ds.canRun = true;
+      if (ds.role === "更便宜：样板代码、单元测试、文档、第二意见代码评审（本机上不能运行命令）") ds.role = BUILTINS[1].role;
+    }
     // Built-ins first (Codex, DeepSeek), then the user's agents in the order they were added.
     const rank = (a: AgentDef) => (a.builtin ? BUILTINS.findIndex((b) => b.id === a.id) : 100);
     this.list = list.map((a, i) => ({ a, i })).sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i).map((x) => x.a);

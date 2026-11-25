@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AgentDef, AgentTestResult, AppInfo, CodexModel, MaoApi, Quota, Settings, UpdateStatus } from "../../shared/types";
+import type { AgentDef, AgentTestResult, AppInfo, CodexModel, MaoApi, Project, Quota, Settings, UpdateStatus } from "../../shared/types";
 import { EFFORT_TEXT, who } from "./derive";
 import { Avatar, DeepseekBalance, QuotaLine } from "./App";
 import geminiAvatar from "./assets/avatars/gemini.png";
@@ -79,6 +79,73 @@ function Presets({ agents }: { agents: AgentDef[] }) {
 }
 
 /** 设置 → 关于: update state and a 「检查更新」 button. */
+/** 设置 → DeepSeek 执行命令: the switch, what the supervisor does, and per-project sandbox access. */
+function DshCommandsSection({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  const [rows, setRows] = useState<{ p: Project; ok: boolean | null; msg?: string }[]>([]);
+  const load = async () => {
+    const ps = (await mao.listProjects()).filter((p) => !p.removed);
+    setRows(ps.map((p) => ({ p, ok: null })));
+    for (const p of ps) {
+      const r = await mao.sandboxAccess(p.id).catch(() => ({ folder: p.folder, ok: false }));
+      setRows((l) => l.map((x) => (x.p.id === p.id ? { ...x, ok: r.ok } : x)));
+    }
+  };
+  useEffect(() => {
+    load();
+  }, []);
+  return (
+    <section>
+      <h3>DeepSeek 执行命令</h3>
+      <label className="check">
+        <input type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked)} /> 允许 DeepSeek 执行命令（受 Claude 监管）
+      </label>
+      <div className="muted small policy">
+        <p>DeepSeek 的命令都在它自己的 Windows 沙箱里运行：只能写项目文件夹（和本对话的附件文件夹），写别处会被系统拒绝。应用还会逐条检查它跑的命令：</p>
+        <ul>
+          <li>✓ 允许：构建、测试、读取文件、git status/diff/log、npm/npx/node 等工作目录里的常规命令。</li>
+          <li>⛔ 拦截（立刻终止 DeepSeek，这次委派算失败）：改注册表 / 服务 / 计划任务 / 权限 / 环境变量，关机重启，格式化磁盘，下载后直接执行，读取凭据文件（.ssh、各家登录信息、浏览器资料），git push / 发布，递归删除工作目录以外或整个工作目录。</li>
+          <li>❓ 需复查：联网下载、安装全局工具、启动外部程序、涉及工作目录以外的路径、改写 git 历史。沙箱照常限制它们，命令记录会交给 Claude 审查。</li>
+        </ul>
+        <p>每条命令和结论都会显示在 DeepSeek 的卡片上，并随委派结果交给 Claude；Claude 审查时会看这份清单，发现可疑命令会单独提醒你，被拦截的命令不会换个方式再跑。</p>
+      </div>
+      {on && rows.length > 0 && (
+        <>
+          <div className="small" style={{ marginTop: 8 }}>
+            项目文件夹的沙箱权限（DeepSeek 的沙箱需要你对项目文件夹有「完全控制」权限；用户文件夹下的项目一般已经有，其他磁盘上的常常没有）：
+          </div>
+          <div className="sandbox-list">
+            {rows.map(({ p, ok, msg }) => (
+              <div key={p.id} className="sandbox-row">
+                <b>{p.name}</b>
+                <span className="muted small path" title={p.folder}>
+                  {p.folder}
+                </span>
+                {ok === null ? (
+                  <span className="muted small">检查中…</span>
+                ) : ok ? (
+                  <span className="ok-text small">✓ 可以运行</span>
+                ) : (
+                  <button
+                    className="btn small"
+                    title="icacls 给当前 Windows 用户这个文件夹的完全控制权限；只影响这个项目文件夹"
+                    onClick={async () => {
+                      const r = await mao.grantSandbox(p.id).catch((e) => ({ ok: false, output: cleanError(e) }));
+                      setRows((l) => l.map((x) => (x.p.id === p.id ? { ...x, ok: r.ok, msg: r.ok ? undefined : r.output } : x)));
+                    }}
+                  >
+                    授予权限
+                  </button>
+                )}
+                {msg && <span className="bad-text small">{msg}</span>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function UpdateRow() {
   const [s, setS] = useState<UpdateStatus | null>(null);
   useEffect(() => {
@@ -451,7 +518,7 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
                 </datalist>
               </label>
               <label className="field">
-                <span>Claude 推理强度</span>
+                <span>Claude 思考等级</span>
                 <select value={s.claudeEffort} onChange={(e) => upd({ claudeEffort: e.target.value })}>
                   <option value="">默认</option>
                   {CLAUDE_EFFORTS.map((x) => (
@@ -503,6 +570,8 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
             {saved && <span className="ok-text small">已保存，新对话生效</span>}
           </div>
         </section>
+
+        {s && <DshCommandsSection on={s.dshCommands !== false} onChange={async (v) => setS(await mao.saveSettings({ dshCommands: v }))} />}
 
         <section>
           <h3>额度与余额</h3>

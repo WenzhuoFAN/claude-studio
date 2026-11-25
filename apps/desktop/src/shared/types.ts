@@ -13,6 +13,8 @@ export interface Settings {
   codexModel: string;
   codexEffort: string;
   splitSmall: boolean;
+  /** Let DeepSeek run commands in its sandbox, supervised (default on). */
+  dshCommands: boolean;
   delegateTimeoutSec: number;
   loginWaitSec: number;
 }
@@ -36,7 +38,7 @@ export interface AgentTestResult {
 
 /** Normalized events. The main process parses claude's stream-json into these. */
 export type RunEventBody =
-  | { k: "user"; text: string }
+  | { k: "user"; text: string; attachments?: Attachment[] }
   | { k: "init"; model: string; mcp: string; sessionId: string }
   | { k: "text"; text: string }
   | { k: "tool"; id: string; name: string; summary: string }
@@ -76,6 +78,26 @@ export interface RunOptions {
   codexModel: string;
   /** Codex reasoning effort; empty = model default. */
   codexEffort: string;
+  /** Claude (lead) model alias or id; empty = Settings default, then Claude Code's own. */
+  claudeModel?: string;
+  /** Claude reasoning effort; empty = Settings default. */
+  claudeEffort?: string;
+}
+
+/** A file the user pasted / dropped / picked; copied into the app's attachments folder. */
+export interface Attachment {
+  name: string;
+  /** absolute path of the copy in the app data folder */
+  path: string;
+  size: number;
+  mime: string;
+  image: boolean;
+}
+
+/** Result of staging files: the accepted ones plus a message per rejected one. */
+export interface StageResult {
+  files: Attachment[];
+  errors: string[];
 }
 
 export interface CodexModel {
@@ -207,8 +229,22 @@ export interface MaoApi {
   onQuota(cb: (q: Quota) => void): () => void;
   onActivity(cb: (a: Activity) => void): () => void;
   onBoardChanged(cb: (projectId: string, board: Board) => void): () => void;
-  startRun(task: string, projectId: string, options: RunOptions): Promise<RunMeta>;
-  sendMessage(runId: string, text: string): Promise<void>;
+  startRun(task: string, projectId: string, options: RunOptions, attachments?: Attachment[]): Promise<RunMeta>;
+  sendMessage(runId: string, text: string, attachments?: Attachment[]): Promise<void>;
+  /** Copy files (by path) into the attachments staging folder. */
+  stageFiles(paths: string[]): Promise<StageResult>;
+  /** Save a pasted image / file that has no path (e.g. a screenshot) into staging. */
+  stageBlob(name: string, mime: string, data: Uint8Array): Promise<StageResult>;
+  /** File picker, then stage. */
+  pickAttachments(): Promise<StageResult>;
+  /** data: URL of an image attachment (only files inside the attachments folder). */
+  attachmentPreview(path: string): Promise<string | null>;
+  /** Path of a dropped / pasted File object (Electron webUtils); "" when it has none. */
+  pathForFile(f: File): string;
+  /** Does the current user have Full Control on a project folder (needed by DeepSeek's sandbox)? */
+  sandboxAccess(projectId: string): Promise<{ folder: string; ok: boolean }>;
+  /** Grant the current user Full Control on the project folder (icacls), so DeepSeek's sandbox can run there. */
+  grantSandbox(projectId: string): Promise<{ ok: boolean; output: string }>;
   stopRun(runId: string): Promise<void>;
   openPath(p: string): Promise<void>;
   openRunLogs(runId: string): Promise<void>;

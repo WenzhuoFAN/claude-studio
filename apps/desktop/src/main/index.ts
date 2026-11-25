@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { readBoard } from "../../../../packages/bridge/src/board";
 import path from "node:path";
 import { deepseekKey, freshUserEnv, locateCodex, locateDsh } from "../../../../packages/bridge/src/locate";
-import type { CodexModel, EnvStatus, RunOptions } from "../shared/types";
+import type { Attachment, CodexModel, EnvStatus, RunOptions } from "../shared/types";
+import { cleanStaging, preview, stageBlob, stageFiles } from "./attachments";
 
 if (process.platform === "win32") app.setAppUserModelId("claude-studio");
 import { APP_NAME, BRIDGE, DATA, DEFAULT_WORKDIR, PACKAGED, ROOT, RUNS, USER_DIR, boardPath, locateClaude, migrateRepoData } from "./paths";
@@ -325,8 +326,9 @@ function registerIpc() {
     mkdirSync(dir, { recursive: true });
     return dir;
   });
-  ipcMain.handle("startRun", (_e, task: string, projectId: string, options?: Partial<RunOptions>) => {
-    if (!task?.trim()) throw new Error("任务不能为空");
+  ipcMain.handle("startRun", (_e, task: string, projectId: string, options?: Partial<RunOptions>, attachments?: Attachment[]) => {
+    if (!task?.trim() && !attachments?.length) throw new Error("任务不能为空");
+    task = String(task ?? "");
     const project = projects.get(projectId);
     if (!project || project.removed) throw new Error("请先选择一个项目");
     if (!existsSync(project.folder)) throw new Error(`项目文件夹不存在：${project.folder}`);
@@ -334,8 +336,36 @@ function registerIpc() {
     const st = envStatus();
     if (!st.claude) throw new Error("找不到 Claude Code（claude.exe），无法开始。");
     if (!st.bridgeBuilt) throw new Error("bridge 还没编译，请先点上方提示里的「编译 bridge」。");
-    const opts: RunOptions = { splitSmall: !!options?.splitSmall, codexModel: options?.codexModel ?? "", codexEffort: options?.codexEffort ?? "" };
-    return runs.start(task.trim(), workdir, project.id, opts);
+    const s = loadSettings();
+    const opts: RunOptions = {
+      splitSmall: !!options?.splitSmall,
+      codexModel: options?.codexModel ?? "",
+      codexEffort: options?.codexEffort ?? "",
+      // Per conversation; undefined (older renderer) falls back to 设置.
+      claudeModel: String(options?.claudeModel ?? s.claudeModel ?? "").trim(),
+      claudeEffort: String(options?.claudeEffort ?? s.claudeEffort ?? ""),
+    };
+    if (opts.claudeModel && !/^[\w.\-:\[\]]+$/.test(opts.claudeModel)) throw new Error(`Claude 模型名称无效：${opts.claudeModel}`);
+    if (opts.claudeEffort && !/^[a-z]+$/.test(opts.claudeEffort)) throw new Error(`Claude 思考等级无效：${opts.claudeEffort}`);
+    return runs.start(task.trim(), workdir, project.id, opts, Array.isArray(attachments) ? attachments : []);
+  });
+  ipcMain.handle("stageFiles", (_e, paths: string[]) => stageFiles(Array.isArray(paths) ? paths.map(String) : []));
+  ipcMain.handle("stageBlob", (_e, name: string, mime: string, data: Uint8Array) => stageBlob(String(name ?? ""), String(mime ?? ""), data));
+  ipcMain.handle("pickAttachments", async () => {
+    const r = await dialog.showOpenDialog(win!, { title: "选择要附加的文件", properties: ["openFile", "multiSelections"] });
+    return r.canceled ? { files: [], errors: [] } : stageFiles(r.filePaths);
+  });
+  ipcMain.handle("attachmentPreview", (_e, p: string) => preview(p));
+  ipcMain.handle("sandboxAccess", async (_e, projectId: string) => {
+    const p = projects.get(projectId);
+    if (!p) throw new Error("没有这个项目");
+    return { folder: p.folder, ok: await hasFullControl(p.folder) };
+  });
+  ipcMain.handle("grantSandbox", async (_e, projectId: string) => {
+    // Only a registered project's folder, never an arbitrary path from the renderer.
+    const p = projects.get(projectId);
+    if (!p || p.removed || !existsSync(p.folder)) throw new Error("项目文件夹不存在");
+    return grantFullControl(p.folder);
   });
   ipcMain.handle("openRunLogs", (_e, id: string) => {
     const d = runs.runDir(id);
@@ -343,11 +373,44 @@ function registerIpc() {
   });
   ipcMain.handle("codexModels", () => codexModels());
   ipcMain.handle("buildBridge", () => buildBridge());
-  ipcMain.handle("sendMessage", (_e, id: string, text: string) => runs.send(id, text));
+  ipcMain.handle("sendMessage", (_e, id: string, text: string, attachments?: Attachment[]) => runs.send(id, text, attachments));
   ipcMain.handle("stopRun", (_e, id: string) => runs.stop(id));
   ipcMain.handle("openPath", (_e, p: string) => {
     if (existsSync(p)) shell.openPath(p);
   });
+}
+
+// ---------------------------------------------------------------- DeepSeek sandbox access
+// dsh's Windows sandbox re-labels the workspace before running a command, which needs Full Control
+// (WRITE_OWNER). Folders under the user profile have it; folders on other drives often only give
+// "Modify" to Authenticated Users. Granting the signed-in user Full Control on the project folder fixes it.
+const currentUser = () => `${process.env.USERDOMAIN ?? os.hostname()}\\${process.env.USERNAME ?? os.userInfo().username}`;
+
+function icacls(args: string[], timeoutMs = 300_000): Promise<{ code: number | null; out: string }> {
+  return new Promise((resolve) => {
+    execFile("icacls.exe", args, { windowsHide: true, timeout: timeoutMs, encoding: "buffer", maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // icacls prints in the OEM code page; the parts we look at (user names, rights) are ASCII.
+      const out = Buffer.concat([stdout as Buffer, stderr as Buffer]).toString("latin1");
+      resolve({ code: err ? ((err as any).code ?? 1) : 0, out });
+    });
+  });
+}
+
+async function hasFullControl(folder: string): Promise<boolean> {
+  if (!existsSync(folder)) return false;
+  const { code, out } = await icacls([folder], 20_000);
+  if (code !== 0) return false;
+  const user = (process.env.USERNAME ?? "").toLowerCase();
+  return out
+    .toLowerCase()
+    .split(/\r?\n/)
+    .some((l) => (l.includes(`\\${user}:`) || l.includes(` ${user}:`) || l.trimStart().startsWith(`${user}:`)) && /\(f\)/.test(l) && !/\(io\)/.test(l));
+}
+
+async function grantFullControl(folder: string): Promise<{ ok: boolean; output: string }> {
+  const { code, out } = await icacls([folder, "/grant", `${currentUser()}:(OI)(CI)(F)`]);
+  const ok = code === 0 && (await hasFullControl(folder));
+  return { ok, output: ok ? `已授予：${currentUser()} 对 ${folder} 的完全控制权限` : `授予失败（${code}）：${out.trim().slice(0, 400)}` };
 }
 
 /**
@@ -514,6 +577,7 @@ function migrateLegacyRuns() {
 
 app.whenReady().then(async () => {
   migrateRepoData();
+  cleanStaging();
   agents = new AgentStore();
   const appSrv = await startAppServer(agents);
   agents.on("changed", (list) => win?.webContents.send("agentsChanged", list));

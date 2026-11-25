@@ -111,6 +111,15 @@ export class WorkerTail {
     const out = (kind: "cmd" | "tool" | "say" | "file" | "error", text: string) => text && this.emit({ k: "worker", id, who: st.who, kind, text });
 
     if (rec.kind === "timeout") return out("error", `超时（${rec.afterSec}s），已结束进程`);
+    // DeepSeek command supervision (bridge cmdpolicy): one line per command with its verdict.
+    if (rec.kind === "cmd_check") {
+      const c = clip(String(rec.command ?? ""), 200);
+      if (rec.verdict === "block") return out("error", `⛔ 拦截：${c}${rec.reason ? ` — ${rec.reason}` : ""}`);
+      if (rec.verdict === "review") return out("cmd", `❓ 需复查：${c}${rec.reason ? ` — ${rec.reason}` : ""}`);
+      return out("cmd", `✓ ${c}`);
+    }
+    if (rec.kind === "abort") return out("error", `已终止 DeepSeek：${clip(String(rec.reason ?? ""), 200)}`);
+    if (rec.kind === "sandbox_acl") return out("error", "沙箱无法在这个项目文件夹准备：需要「完全控制」权限（点卡片上的「授予 DeepSeek 沙箱权限」）");
     // Registry agents (not codex / deepseek): show plain output lines as they come.
     if (st.who !== "codex" && st.who !== "deepseek") {
       if (rec.kind === "stdout") out("say", clip(rec.line));
@@ -135,7 +144,11 @@ export class WorkerTail {
         this.emit({ k: "worker_tokens", id, tokens: total });
         return;
       }
-      if (ev?.type === "tool_call") {
+      if (ev?.type === "tool_call" && /^(pwsh|powershell|bash|shell|sh|cmd|exec|run)$/i.test(String(ev.tool ?? "")) && ev.input?.command) {
+        return; // shown by its cmd_check record
+      } else if (ev?.type === "tool_result" && ev.error?.code === "SANDBOX_PREPARATION_FAILED") {
+        return; // shown by the sandbox_acl record
+      } else if (ev?.type === "tool_call") {
         const inp = ev.input ?? {};
         const target = inp.command ?? inp.file_path ?? inp.path ?? inp.pattern ?? "";
         const isWrite = /write|edit|patch/i.test(String(ev.tool));

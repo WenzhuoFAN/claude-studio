@@ -1,5 +1,6 @@
 // Generic "spawn an agent CLI, feed the task on stdin, parse JSONL events" runner.
 import { spawn, execFile } from "node:child_process";
+import type { CmdRecord } from "./cmdpolicy.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +31,8 @@ export interface AgentResult {
   errors: string[];
   stderrTail: string;
   logFile: string;
+  /** Commands the agent ran, with the supervisor's verdict (DeepSeek). */
+  commands?: CmdRecord[];
 }
 
 export interface Parser {
@@ -42,6 +45,9 @@ export interface Parser {
   errors(): string[];
   /** true if the agent itself reported success */
   completed(): boolean;
+  /** Optional: records to append to the call log, and a reason to stop the agent right now. */
+  drain?(): { log: Record<string, unknown>[]; abort?: string };
+  commands?(): CmdRecord[];
 }
 
 export interface RunSpec {
@@ -89,6 +95,7 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
   let stderr = "";
   let buf = "";
   let timedOut = false;
+  let aborted = "";
 
   const exit = await new Promise<{ code: number | null; spawnError?: string }>((resolve) => {
     let child;
@@ -117,6 +124,15 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
         const ev = JSON.parse(l);
         log({ kind: "event", ev });
         spec.parser.onEvent(ev);
+        const d = spec.parser.drain?.();
+        if (d) {
+          for (const rec of d.log) log(rec);
+          if (d.abort && !aborted) {
+            aborted = d.abort;
+            log({ kind: "abort", reason: d.abort });
+            killTree(child.pid);
+          }
+        }
       } catch {
         log({ kind: "stdout", line: l });
         spec.parser.onRaw?.(l);
@@ -153,12 +169,13 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
   const durationSec = Math.round((Date.now() - started.getTime()) / 100) / 10;
   const errors = spec.parser.errors().map(scrub);
   if (exit.spawnError) errors.push(`spawn error: ${exit.spawnError}`);
+  if (aborted) errors.push(`stopped by supervisor: ${aborted}`);
 
   const status: AgentResult["status"] = exit.spawnError
     ? "spawn_error"
     : timedOut
       ? "timeout"
-      : exit.code === 0 && spec.parser.completed()
+      : !aborted && exit.code === 0 && spec.parser.completed()
         ? "completed"
         : "failed";
 
@@ -174,6 +191,7 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
     errors,
     stderrTail: scrub(stderr.slice(-4000)),
     logFile,
+    ...(spec.parser.commands ? { commands: spec.parser.commands().map((c) => ({ ...c, command: scrub(c.command) })) } : {}),
   };
   log({ kind: "stderr", text: scrub(stderr) });
   log({ kind: "result", result });

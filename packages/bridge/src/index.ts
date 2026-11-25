@@ -44,6 +44,11 @@ server.registerTool(
       model: z.string().optional().describe("Codex model slug. Omit to use the user's configured default"),
       reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).optional().describe("Codex reasoning effort. Omit for the default"),
       timeoutSec: z.number().int().positive().max(3600).optional().describe("Kill after this many seconds (default 900)"),
+      images: z
+        .array(z.string())
+        .max(10)
+        .optional()
+        .describe("Absolute paths of images (e.g. the user's attached screenshots) for Codex to see. Must be inside cwd or the conversation's attachments folder"),
     },
   },
   (args) => guard(async () => toolResult(await delegateToCodex(args))),

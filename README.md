@@ -83,9 +83,30 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
 
 | 选项 | 作用 |
 |---|---|
+| Claude 模型 | 主管 Claude 用的模型（`--model`：Opus / Sonnet / Fable / Haiku）；默认值来自 设置 → 默认设置 |
+| Claude 思考 | Claude 的思考等级（`--effort`：低 … 最高）；默认值来自设置 |
 | 把任务拆小 | 让 Claude 把 Codex 的工作拆成几分钟能完成的小单元，每个单元审查通过后再委派下一个 |
 | Codex 模型 | 列表来自 `codex debug models`；「默认」= 用 Codex 自己的设置 |
 | 推理强度 | Codex 的 reasoning effort；可选项随模型变化 |
+
+这些选项按对话保存（续聊时沿用），显示在右侧总览卡片上。
+
+### 附件（图片和文件）
+
+- 在输入框里 **Ctrl+V** 粘贴截图或在资源管理器里复制的文件，或者把文件**拖进**输入框，或点左下角 **📎** 选择文件。发送前显示为缩略图 / 文件卡片，可以点 × 移除；发出去的消息里也会显示，图片可以点开放大。
+- 图片 ≤ 20 MB（png / jpg / gif / webp 会作为真正的图片直接发给 Claude），其他文件 ≤ 50 MB（Claude 用 Read 读取，PDF 也可以），一次最多 20 个。
+- 附件复制到 `%APPDATA%\Claude 的工作室\attachments\<对话编号>\`（保留原文件名），**不会放进项目文件夹**；这个文件夹通过 `--add-dir` 交给 Claude，续聊时以前的附件也能读。
+- 委派时 Claude 会把附件路径写进任务：Codex 可以读这个文件夹，图片还能通过 `images` 参数直接给 Codex 看；DeepSeek 的沙箱会额外放行这个文件夹（`--add-dir`）；其他智能体由 Claude 把需要的内容写进任务。
+
+### DeepSeek 执行命令（受 Claude 监管）
+
+DeepSeek 现在可以跑构建 / 测试等命令（设置 → DeepSeek 执行命令，默认开启）：
+
+- **沙箱是硬边界**：命令在 dsh 自己的 Windows 沙箱里运行，只能写项目文件夹和本对话的附件文件夹，写别处会被系统拒绝。
+- **逐条监管**：bridge 检查 DeepSeek 报出的每条命令，卡片上实时显示 ✓ 允许 / ❓ 需复查 / ⛔ 拦截。拦截类（改注册表、服务、计划任务、权限、环境变量，关机，格式化，下载后执行，读凭据文件，git push / 发布，递归删除工作目录以外或整个工作目录）会**立刻终止** DeepSeek，这次委派算失败。需复查类（联网下载、安装全局工具、启动外部程序、工作目录以外的路径、改写 git 历史）照常受沙箱限制，记录交给 Claude 审查。
+- **Claude 审查**：完整命令清单随委派结果交给 Claude；它审查时必须看这份清单，可疑的会单独提醒你，被拦截的命令不会换个方式再跑。
+- dsh headless 没有逐条命令的审批接口，所以「拦截」是发现后立刻结束进程，而不是事前暂停；真正挡住越界写入的是沙箱。
+- **沙箱权限**：dsh 的沙箱需要你对项目文件夹有「完全控制」权限。用户文件夹（`C:\Users\<你>\…`）下的项目一般已经有；其他磁盘上的文件夹常常只有「修改」，这时 DeepSeek 的卡片上会出现 **「授予 DeepSeek 沙箱权限」**，点一下（等于 `icacls <项目文件夹> /grant <你>:(OI)(CI)(F)`，只影响这个文件夹）；设置页里也能逐个项目检查和授予。
 
 环境有问题时（例如 bridge 没编译、找不到 Codex、缺少 DeepSeek key），中栏顶部会出现黄色提示，bridge 没编译可以直接点「编译 bridge」。
 
@@ -190,7 +211,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-task.ps1 "你的任务"
 - Claude 以 `dontAsk` 模式运行：只允许 bridge 工具、读写文件，以及 `npm / npx / node / git status / git diff` 等构建测试命令；其他命令一律被拒绝。白名单在 `config\claude-allowed-tools.json`，桌面版和命令行共用。
 - 桌面版窗口开启了上下文隔离和沙箱，页面不能直接访问 Node；外部链接一律用系统浏览器打开。
 - Codex 用 `-s read-only` 或 `-s workspace-write` 沙箱，只能写 cwd。
-- DeepSeek 用 `workspace-write` 权限预设，工作区就是 cwd。
+- DeepSeek 用 `workspace-write` 权限预设，工作区就是 cwd（外加本对话的附件文件夹）；它跑的每条命令都经过 bridge 的监管策略（`packages/bridge/src/cmdpolicy.ts`），危险命令会让它当场被终止。
 - 不做全局安装，不改 PATH，不读密钥文件；API key 只在启动 dsh 时放进它的环境变量，日志里会被替换成 `***`。
 
 ## 目录结构
@@ -219,7 +240,8 @@ claude-studio/
 
 ## 已知限制
 
-- **DeepSeek 在部分 Windows 环境下不能执行命令**：dsh 的 Windows 沙箱可能在给工作目录设置 ACL 时报 `SetNamedSecurityInfoW failed (Win32 5)`，这时它只能读写文件，测试由 Claude 来跑。
+- **DeepSeek 的沙箱需要项目文件夹的「完全控制」权限**：没有时 dsh 报 `SetNamedSecurityInfoW failed (Win32 5)`，命令不会执行；应用会识别这个错误，在卡片上给出「授予 DeepSeek 沙箱权限」。
+- **DeepSeek 的沙箱不允许带 IPC 的子进程**（`fork`）：`node --test` 默认会报 `spawn EPERM`，要用 `node --test --experimental-test-isolation=none`（已写进给它的提示）；jest / vitest 这类开 worker 的测试框架在它那里可能跑不了，这时由 Claude 来跑测试。
 - Codex 沙箱默认不联网；需要 `npm install` 时 Claude 会传 `allowNetwork: true`（npm 缓存放在工作目录的 `.npm-cache`）。
 
 - Claude Code 等待一次委派的上限由 `MCP_TOOL_TIMEOUT` 控制，脚本已设为“委派超时 + 2 分钟”。
