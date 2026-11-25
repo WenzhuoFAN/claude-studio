@@ -2,7 +2,7 @@
 // avatars in <userData>/data/avatars/<id>.png, API keys encrypted with Electron safeStorage (DPAPI on Windows)
 // in <userData>/data/secrets.json. Keys are never written in plain text, sent to the renderer, or logged.
 import { safeStorage } from "electron";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, watchFile, writeFileSync } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { AgentDef } from "../../../../packages/bridge/src/registry";
@@ -46,26 +46,52 @@ const writeJson = (f: string, v: unknown) => {
 export class AgentStore extends EventEmitter {
   private list: AgentDef[] = [];
 
+  private lastWrite = 0;
+
   constructor() {
     super();
     mkdirSync(AVATAR_DIR, { recursive: true });
+    this.load();
+    this.save(false);
+    // Pick up edits made outside this window (another app window, the bridge, a setup script).
+    watchFile(AGENTS_FILE, { interval: 1500 }, (cur) => {
+      if (!cur.mtimeMs || Math.abs(cur.mtimeMs - this.lastWrite) < 5) return;
+      if (this.load()) this.emit("changed", this.all());
+    });
+  }
+
+  /** Read agents.json. A file that can't be parsed is kept as a backup instead of being overwritten. */
+  private load(): boolean {
+    let list: AgentDef[] = [];
     try {
-      if (existsSync(AGENTS_FILE)) this.list = JSON.parse(readFileSync(AGENTS_FILE, "utf8"));
+      if (existsSync(AGENTS_FILE)) list = JSON.parse(readFileSync(AGENTS_FILE, "utf8").replace(/^﻿/, ""));
+      if (!Array.isArray(list)) throw new Error("not a list");
     } catch {
-      this.list = [];
+      try {
+        copyFileSync(AGENTS_FILE, AGENTS_FILE.replace(/\.json$/, `.unreadable-${Date.now()}.json`));
+      } catch {
+        /* nothing to keep */
+      }
+      if (this.list.length) return false; // keep what is in memory
+      list = [];
     }
     // Built-ins always exist (editable, not deletable); keep the user's edits.
-    for (const b of BUILTINS) if (!this.list.some((a) => a.id === b.id)) this.list.push({ ...b });
-    for (const a of this.list) if (a.builtin) a.type = "builtin";
+    for (const b of BUILTINS) if (!list.some((a) => a.id === b.id)) list.push({ ...b });
+    for (const a of list) if (a.builtin) a.type = "builtin";
     // Built-ins first (Codex, DeepSeek), then the user's agents in the order they were added.
     const rank = (a: AgentDef) => (a.builtin ? BUILTINS.findIndex((b) => b.id === a.id) : 100);
-    this.list = this.list.map((a, i) => ({ a, i })).sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i).map((x) => x.a);
-    this.save(false);
+    this.list = list.map((a, i) => ({ a, i })).sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i).map((x) => x.a);
+    return true;
   }
 
   private save(emit = true) {
     for (const a of this.list) if (a.type === "openai" && a.openai) a.openai.hasKey = !!this.secret(a.id);
     writeJson(AGENTS_FILE, this.list);
+    try {
+      this.lastWrite = statSync(AGENTS_FILE).mtimeMs;
+    } catch {
+      /* ignore */
+    }
     if (emit) this.emit("changed", this.all());
   }
 
