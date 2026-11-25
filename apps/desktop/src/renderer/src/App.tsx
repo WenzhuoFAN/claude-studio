@@ -22,6 +22,15 @@ declare global {
 const mao = window.mao;
 
 export const APP_NAME = "Claude 的工作室";
+
+/** Small "v1.0.1" next to the app name, so it is obvious which build is running. */
+function BrandVersion() {
+  const [v, setV] = useState("");
+  useEffect(() => {
+    mao.appInfo().then((i) => setV(`v${i.version}${i.packaged ? "" : " 开发版"}`)).catch(() => {});
+  }, []);
+  return v ? <span className="brand-ver">{v}</span> : null;
+}
 type Who = string;
 export const BUILTIN_AVATARS: Record<string, string> = { claude: claudeAvatar, codex: codexAvatar, deepseek: deepseekAvatar };
 const PORTRAIT: Record<string, string> = { claude: claudeFull, codex: codexFull, deepseek: deepseekFull };
@@ -379,7 +388,9 @@ function Sidebar(props: {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-title">{APP_NAME}</div>
+        <div className="brand-title">
+          {APP_NAME} <BrandVersion />
+        </div>
         <div className="presence">
           {["claude", ...AGENT_ORDER].map((w) => {
             const p = presence(w, env, props.activity, props.quota, props.auth ?? undefined);

@@ -180,6 +180,10 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  // Window title shows the running build, e.g. "Claude 的工作室 v1.0.1" (or "… 开发版").
+  const title = `${APP_NAME} v${app.getVersion()}${PACKAGED ? "" : " 开发版"}`;
+  win.setTitle(title);
+  win.on("page-title-updated", (e) => e.preventDefault());
   // Never open external pages inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url);
