@@ -1,0 +1,12 @@
+node_modules/
+packages/bridge/dist/
+logs/*
+!logs/.gitkeep
+sandbox/**/node_modules/
+sandbox/**/dist/
+.npm-cache/
+apps/desktop/out/
+data/
+dist/
+sandbox/
+docs/_private/

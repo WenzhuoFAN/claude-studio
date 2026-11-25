@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mao-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["packages/bridge/dist/index.js"]
+    }
+  }
+}

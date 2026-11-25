@@ -1,0 +1,72 @@
+{
+  "name": "claude-studio",
+  "productName": "Claude 的工作室",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude 的工作室：Claude 当主管，调度 Codex、DeepSeek 和你添加的智能体一起写代码",
+  "author": "claude-studio",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -p .",
+    "dist": "npm --prefix ../../packages/bridge run build && electron-vite build && electron-builder --win nsis --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.10",
+    "@types/react": "^19.3.2",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "dompurify": "^3.5.0",
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "marked": "^18.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "build": {
+    "appId": "io.github.claude-studio",
+    "productName": "Claude 的工作室",
+    "executableName": "ClaudeStudio",
+    "directories": {
+      "output": "../../dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**",
+      "build/icon.ico",
+      "build/icon.png",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "../../packages/bridge/dist", "to": "bridge/dist" },
+      { "from": "../../packages/bridge/package.json", "to": "bridge/package.json" },
+      {
+        "from": "../../packages/bridge/node_modules",
+        "to": "bridge/node_modules",
+        "filter": ["**/*", "!typescript/**", "!@typescript/**", "!@types/**", "!.bin/**"]
+      },
+      { "from": "../../CLAUDE.md", "to": "CLAUDE.md" },
+      { "from": "../../config", "to": "config" }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Claude 的工作室",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "ClaudeStudio-Setup-${version}.${ext}"
+    }
+  }
+}
