@@ -6,7 +6,9 @@ export interface Card {
   who: Worker;
   task: string;
   mode?: string;
-  status: "running" | "done" | "failed";
+  status: "running" | "done" | "failed" | "cancelled";
+  /** moved to the background so Claude could read a steering message */
+  detached?: boolean;
   startedAt: number;
   endedAt?: number;
   durationSec?: number;
@@ -67,6 +69,9 @@ export function deriveCards(events: RunEvent[]): Card[] {
       const c: Card = { id: ev.id, who: ev.who, task: ev.task, mode: ev.mode, status: "running", startedAt: ev.t, files: [], activity: [], label, parentId };
       cards.push(c);
       byId.set(ev.id, c);
+    } else if (ev.k === "delegate_detached") {
+      const c = byId.get(ev.id);
+      if (c) c.detached = true;
     } else if (ev.k === "worker_tokens") {
       const c = byId.get(ev.id);
       if (c) c.liveTokens = ev.tokens;
@@ -76,7 +81,8 @@ export function deriveCards(events: RunEvent[]): Card[] {
       const c = byId.get(ev.id);
       if (!c) continue;
       Object.assign(c, {
-        status: ev.ok ? "done" : "failed",
+        status: ev.ok ? "done" : ev.status === "cancelled" ? "cancelled" : "failed",
+        detached: false,
         endedAt: ev.t,
         durationSec: ev.durationSec,
         tokens: ev.tokens,
@@ -93,7 +99,7 @@ export function deriveCards(events: RunEvent[]): Card[] {
         }
       }
     } else if (ev.k === "exit") {
-      for (const c of cards) if (c.status === "running") Object.assign(c, { status: "failed", endedAt: ev.t, error: ev.stopped ? "已手动停止" : "主进程已退出，委派被中断" });
+      for (const c of cards) if (c.status === "running") Object.assign(c, { status: "failed", endedAt: ev.t, error: ev.redirect ? "已打断（打断并改向）" : ev.stopped ? "已手动停止" : "主进程已退出，委派被中断" });
     }
   }
   return cards;

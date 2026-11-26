@@ -3,6 +3,8 @@
     "mcp__mao-bridge__delegate_to_deepseek",
     "mcp__mao-bridge__list_agents",
     "mcp__mao-bridge__delegate_to_agent",
+    "mcp__mao-bridge__wait_delegation",
+    "mcp__mao-bridge__cancel_delegation",
     "mcp__mao-bridge__project_status",
     "mcp__mao-bridge__claim_files",
     "mcp__mao-bridge__release_files",

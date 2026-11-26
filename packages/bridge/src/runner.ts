@@ -1,5 +1,6 @@
 // Generic "spawn an agent CLI, feed the task on stdin, parse JSONL events" runner.
 import { spawn, execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { CmdRecord } from "./cmdpolicy.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -22,7 +23,7 @@ export interface Usage {
 export interface AgentResult {
   agent: string;
   ok: boolean;
-  status: "completed" | "failed" | "timeout" | "spawn_error" | "auth_required";
+  status: "completed" | "failed" | "timeout" | "spawn_error" | "auth_required" | "cancelled";
   finalAnswer: string;
   filesChanged: FileChanges;
   durationSec: number;
@@ -65,6 +66,13 @@ export interface RunSpec {
   meta?: Record<string, unknown>;
 }
 
+/** Delegation id of the bridge call that is running this agent (see index.ts track()). */
+export const delegationScope = new AsyncLocalStorage<string>();
+/** Running agent processes by delegation id: cancel_delegation stops them. */
+export const cancellers = new Map<string, (reason: string) => void>();
+/** Cancelled before the agent process started (e.g. while waiting for a login). */
+export const preCancelled = new Map<string, string>();
+
 function killTree(pid: number | undefined) {
   if (!pid) return;
   // On Windows child.kill() only kills the direct child (cmd.exe / electron launcher), not the tree.
@@ -96,8 +104,15 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
   let buf = "";
   let timedOut = false;
   let aborted = "";
+  let cancelled = "";
+  const scope = delegationScope.getStore();
+  if (scope && preCancelled.has(scope)) cancelled = preCancelled.get(scope) || "cancelled";
 
   const exit = await new Promise<{ code: number | null; spawnError?: string }>((resolve) => {
+    if (cancelled) {
+      resolve({ code: null });
+      return;
+    }
     let child;
     try {
       child = spawn(spec.command, spec.args, {
@@ -111,6 +126,13 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
       resolve({ code: null, spawnError: String(e?.message ?? e) });
       return;
     }
+    if (scope)
+      cancellers.set(scope, (reason) => {
+        if (cancelled) return;
+        cancelled = reason || "cancelled";
+        log({ kind: "cancelled", reason: cancelled });
+        killTree(child.pid);
+      });
     const timer = setTimeout(() => {
       timedOut = true;
       log({ kind: "timeout", afterSec: spec.timeoutSec });
@@ -158,6 +180,7 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (scope) cancellers.delete(scope);
       if (buf) handleLine(buf);
       resolve({ code });
     });
@@ -169,9 +192,12 @@ export async function runAgent(spec: RunSpec): Promise<AgentResult> {
   const durationSec = Math.round((Date.now() - started.getTime()) / 100) / 10;
   const errors = spec.parser.errors().map(scrub);
   if (exit.spawnError) errors.push(`spawn error: ${exit.spawnError}`);
+  if (cancelled) errors.push(`cancelled: ${cancelled}`);
   if (aborted) errors.push(`stopped by supervisor: ${aborted}`);
 
-  const status: AgentResult["status"] = exit.spawnError
+  const status: AgentResult["status"] = cancelled
+    ? "cancelled"
+    : exit.spawnError
     ? "spawn_error"
     : timedOut
       ? "timeout"

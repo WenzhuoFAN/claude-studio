@@ -174,6 +174,7 @@ pre, code { font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px
 .pill.running { background: #3a2f14; color: #f0c25c; }
 .pill.done { background: #12301b; color: #7ee293; }
 .pill.failed { background: #3a1d20; color: #ffb4b4; }
+.pill.cancelled { background: #2a2c33; color: #a9adb8; }
 
 /* ---------- phase B */
 .btn.small { padding: 2px 10px; font-size: 12px; margin-left: 8px; }
@@ -194,6 +195,7 @@ pre, code { font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px
 .live .act { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
 .act.say { font-family: inherit; font-size: 12.5px; }
 .act.error, .actlog .error { color: #ffb4b4; }
+.act.detached { color: #f0c25c; margin-right: 8px; }
 .act.file, .actlog .file { color: #e3c178; }
 .spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line2); border-top-color: var(--warn); animation: spin .8s linear infinite; flex: none; }
 .card-links { display: flex; gap: 14px; }
@@ -466,3 +468,14 @@ button.tnode:hover { border-color: var(--line2); background: #232837; }
 .composer-actions .options select { max-width: 130px; padding: 2px 4px; }
 .composer-actions > .btn { flex: none; }
 .composer-actions .hint { margin-left: auto; margin-right: 0; white-space: nowrap; }
+
+/* messages sent while Claude was working */
+.msg.user.steer .bubble { border-style: dashed; border-color: #6b5a33; }
+.steer-tag { display: flex; gap: 8px; align-items: center; font-size: 11.5px; margin-bottom: 4px; white-space: nowrap; }
+.steer-kind { color: var(--claude); font-weight: 600; }
+.steer-state { color: var(--muted); }
+.steer-tag.ok .steer-state { color: #7ee293; }
+.tdot.cancelled { background: #6b6f7a; }
+.tcancel { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.tnode.cancelled .tlabel { text-decoration: line-through; color: var(--muted); }
+.resultbar.steer { border-color: #6b5a33; color: var(--claude); }

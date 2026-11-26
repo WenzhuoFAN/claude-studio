@@ -8,7 +8,9 @@ import { DEFAULT_TIMEOUT_SEC, checkCwd, delegateToCodex, delegateToDeepseek, for
 import { cliHealthy, readAgents, runCliAgent, runOpenAiAgent, type AgentDef } from "./registry.js";
 import { ensureAgentLogin } from "./auth.js";
 import { claimFiles, collabEnabled, delegationConflicts, postNote, projectStatus, readNotes, releaseFiles, takeUnread, waitForFiles } from "./collab.js";
-import type { AgentResult } from "./runner.js";
+import { cancellers, delegationScope, preCancelled, type AgentResult } from "./runner.js";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 const server = new McpServer({ name: "mao-bridge", version: "0.3.0" });
 
@@ -27,6 +29,113 @@ const guard = async (f: () => Promise<{ content: { type: "text"; text: string }[
     return toolError(e);
   }
 };
+
+// ---------------------------------------------------------------- steering-aware delegations
+// The app bumps steer.json (in this run's log folder) when the user sends a message mid-task.
+// Claude only sees that message after the current tool call returns, so a long delegation hands
+// control back early and keeps running in the background (wait_delegation / cancel_delegation).
+type ToolOut = { content: { type: "text"; text: string }[]; isError: boolean };
+interface Tracked {
+  id: string;
+  who: string;
+  promise: Promise<ToolOut>;
+  done: boolean;
+  result?: ToolOut;
+}
+const tracked = new Map<string, Tracked>();
+let nextDelegation = 1;
+const STEER_FILE = process.env.MAO_LOG_DIR ? path.join(process.env.MAO_LOG_DIR, "steer.json") : "";
+const steerSeq = () => {
+  if (!STEER_FILE) return 0;
+  try {
+    return Number(JSON.parse(readFileSync(STEER_FILE, "utf8")).seq) || 0;
+  } catch {
+    return 0;
+  }
+};
+const withId = (id: string, r: ToolOut): ToolOut => ({ ...r, content: [{ type: "text", text: `delegation: ${id}\n${r.content.map((c) => c.text).join("\n")}` }] });
+
+function track(who: string, run: () => Promise<ToolOut>): Promise<ToolOut> {
+  const id = `d${nextDelegation++}`;
+  const t: Tracked = { id, who, done: false, promise: undefined as unknown as Promise<ToolOut> };
+  t.promise = delegationScope.run(id, () => guard(run)).then((r) => {
+    t.done = true;
+    t.result = withId(id, r);
+    return t.result;
+  });
+  tracked.set(id, t);
+  return waitOrSteer(t);
+}
+
+async function waitOrSteer(t: Tracked): Promise<ToolOut> {
+  if (!STEER_FILE) return t.promise;
+  const seq0 = steerSeq();
+  let timer: NodeJS.Timeout | undefined;
+  const steered = new Promise<"steer">((res) => {
+    timer = setInterval(() => steerSeq() > seq0 && res("steer"), 1000);
+  });
+  try {
+    const r = await Promise.race([t.promise, steered]);
+    if (r !== "steer") return r;
+    return text(
+      `DETACHED delegation: ${t.id}\n` +
+        `⏸ 用户刚发来一条任务中引导消息（紧跟在这条工具结果之后，你马上会看到）。为了让你立刻看到它，这次委派（${t.who}）已转到后台继续运行，还没有结束。\n` +
+        `读完引导后决定：\n` +
+        `- 引导不影响这项工作 → 调用 wait_delegation({ id: "${t.id}" }) 继续等它完成并拿到结果；\n` +
+        `- 引导让它过时或方向不对 → 调用 cancel_delegation({ id: "${t.id}", reason: "…" })，再按新要求重新委派。\n` +
+        `结束本轮回复前，后台委派必须都等完或取消。`,
+    );
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+server.registerTool(
+  "wait_delegation",
+  {
+    title: "Wait for delegation",
+    description:
+      "Keep waiting for a delegation that was moved to the background because the user sent a steering message (its id is in the DETACHED notice). Returns its normal result.",
+    inputSchema: { id: z.string().describe('Delegation id, e.g. "d3"') },
+  },
+  ({ id }) =>
+    guard(async () => {
+      const t = tracked.get(id);
+      if (!t) return toolError(`没有编号为 ${id} 的委派`);
+      return t.done ? t.result! : waitOrSteer(t);
+    }),
+);
+
+server.registerTool(
+  "cancel_delegation",
+  {
+    title: "Cancel delegation",
+    description:
+      "Stop a delegation running in the background (e.g. the user's steering message made it obsolete). Files it already changed stay changed: check them before re-delegating.",
+    inputSchema: {
+      id: z.string().describe('Delegation id, e.g. "d3"'),
+      reason: z.string().describe("Short reason, shown to the user"),
+    },
+  },
+  ({ id, reason }) =>
+    guard(async () => {
+      const t = tracked.get(id);
+      if (!t) return toolError(`没有编号为 ${id} 的委派`);
+      if (t.done) return text(`委派 ${id} 已经结束，无法取消。它的结果：\n${t.result!.content[0].text}`);
+      const why = `用户引导：${reason}`;
+      const c = cancellers.get(id);
+      if (c) c(why);
+      else preCancelled.set(id, why); // not started yet (e.g. waiting for a login)
+      const r = await Promise.race([t.promise, new Promise<null>((res) => setTimeout(() => res(null), 20_000))]);
+      return r ?? text(`已请求取消委派 ${id}（它还没启动，例如在等登录）；它不会再开始工作。`);
+    }),
+);
+
+// The conversation ended (Claude exited): don't leave background workers running.
+process.stdin.on("close", () => {
+  for (const c of cancellers.values()) c("对话已结束");
+  setTimeout(() => process.exit(0), 1500).unref();
+});
 
 server.registerTool(
   "delegate_to_codex",
@@ -51,7 +160,7 @@ server.registerTool(
         .describe("Absolute paths of images (e.g. the user's attached screenshots) for Codex to see. Must be inside cwd or the conversation's attachments folder"),
     },
   },
-  (args) => guard(async () => toolResult(await delegateToCodex(args))),
+  (args) => track("Codex", async () => toolResult(await delegateToCodex(args))),
 );
 
 server.registerTool(
@@ -68,7 +177,7 @@ server.registerTool(
       timeoutSec: z.number().int().positive().max(3600).optional().describe("Kill after this many seconds (default 900)"),
     },
   },
-  (args) => guard(async () => toolResult(await delegateToDeepseek(args))),
+  (args) => track("DeepSeek", async () => toolResult(await delegateToDeepseek(args))),
 );
 
 // ---------------------------------------------------------------- registry-driven agents
@@ -103,7 +212,7 @@ server.registerTool(
     },
   },
   ({ agentId, task, cwd, mode, model, timeoutSec }) =>
-    guard(async () => {
+    track(agentId, async () => {
       const def = readAgents().find((a) => a.id === agentId);
       if (agentId === "codex" || def?.builtin === "codex") return toolResult(await delegateToCodex({ task, cwd, mode: mode ?? "workspace-write", model, timeoutSec }));
       if (agentId === "deepseek" || def?.builtin === "deepseek") return toolResult(await delegateToDeepseek({ task, cwd, timeoutSec }));

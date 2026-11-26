@@ -48,6 +48,7 @@ const api: MaoApi = {
   onActivity: (cb) => on("activity", cb),
   startRun: (task, projectId, options, attachments) => ipcRenderer.invoke("startRun", task, projectId, options, attachments),
   sendMessage: (id, text, attachments) => ipcRenderer.invoke("sendMessage", id, text, attachments),
+  steerRun: (id, text, attachments, mode) => ipcRenderer.invoke("steerRun", id, text, attachments, mode),
   setRunOptions: (id, options) => ipcRenderer.invoke("setRunOptions", id, options),
   stageFiles: (paths) => ipcRenderer.invoke("stageFiles", paths),
   stageBlob: (name, mime, data) => ipcRenderer.invoke("stageBlob", name, mime, data),

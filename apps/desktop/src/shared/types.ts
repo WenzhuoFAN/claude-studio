@@ -38,7 +38,12 @@ export interface AgentTestResult {
 
 /** Normalized events. The main process parses claude's stream-json into these. */
 export type RunEventBody =
-  | { k: "user"; text: string; attachments?: Attachment[] }
+  /** steer: sent while Claude was working (live = straight into the running turn, queued = after the turn, redirect = turn interrupted for it) */
+  | { k: "user"; text: string; attachments?: Attachment[]; steer?: "live" | "queued" | "redirect"; sid?: string }
+  /** Claude has received the steering message sid. */
+  | { k: "steer_ack"; sid: string }
+  /** A delegation was moved to the background so Claude could read a steering message (bridge id bg). */
+  | { k: "delegate_detached"; id: string; bg: string }
   | { k: "init"; model: string; mcp: string; sessionId: string }
   | { k: "text"; text: string }
   | { k: "tool"; id: string; name: string; summary: string }
@@ -48,7 +53,7 @@ export type RunEventBody =
       k: "delegate_result";
       id: string;
       who: Worker;
-      status: string; // completed | failed | timeout | spawn_error | error
+      status: string; // completed | failed | timeout | spawn_error | error | cancelled
       ok: boolean;
       durationSec?: number;
       tokens?: number;
@@ -65,7 +70,7 @@ export type RunEventBody =
   | { k: "worker_tokens"; id: string; tokens: number }
   | { k: "stderr"; text: string }
   | { k: "result"; ok: boolean; costUsd?: number; durationSec?: number; turns?: number; text: string; outputTokens?: number; tokens?: number }
-  | { k: "exit"; code: number | null; stopped: boolean };
+  | { k: "exit"; code: number | null; stopped: boolean; /** stopped for 打断并改向 (the conversation continues) */ redirect?: boolean };
 
 export type RunEvent = RunEventBody & { seq: number; t: number /* epoch ms */ };
 
@@ -231,6 +236,8 @@ export interface MaoApi {
   onBoardChanged(cb: (projectId: string, board: Board) => void): () => void;
   startRun(task: string, projectId: string, options: RunOptions, attachments?: Attachment[]): Promise<RunMeta>;
   sendMessage(runId: string, text: string, attachments?: Attachment[]): Promise<void>;
+  /** Message while Claude is working: steer = into the running turn, redirect = stop the turn and resume with it. */
+  steerRun(runId: string, text: string, attachments: Attachment[] | undefined, mode: "steer" | "redirect"): Promise<void>;
   /** Change a conversation's model / effort options; used from its next message on. */
   setRunOptions(runId: string, options: RunOptions): Promise<void>;
   /** Copy files (by path) into the attachments staging folder. */

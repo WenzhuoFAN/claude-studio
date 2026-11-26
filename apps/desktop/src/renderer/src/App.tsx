@@ -33,7 +33,7 @@ const STATUS_TEXT: Record<RunMeta["status"], string> = {
   interrupted: "已中断",
 };
 
-const DELEGATE_STATUS: Record<string, string> = { timeout: "超时", spawn_error: "启动失败", error: "出错", failed: "失败" };
+const DELEGATE_STATUS: Record<string, string> = { timeout: "超时", spawn_error: "启动失败", error: "出错", failed: "失败", cancelled: "已取消（因引导）" };
 
 export function Avatar({ who: id, size = 26 }: { who: Who; size?: number }) {
   const info = who(id);
@@ -72,6 +72,8 @@ function timeLabel(ts: number) {
 const runTokens = (r: RunMeta) => Object.values(r.tokens ?? {}).reduce((a, b) => a + (b ?? 0), 0);
 
 const TOOL_LABEL: Record<string, string> = {
+  wait_delegation: "继续等待后台委派",
+  cancel_delegation: "取消委派",
   project_status: "查看项目看板",
   claim_files: "占用文件",
   release_files: "释放文件",
@@ -511,10 +513,10 @@ function EnvBanner({ env, onRefresh }: { env: EnvStatus | null; onRefresh: () =>
 
 // ------------------------------------------------------------------ chat
 type ChatItem =
-  | { type: "user"; ev: RunEvent & { k: "user" } }
+  | { type: "user"; ev: RunEvent & { k: "user" }; acked?: boolean }
   | { type: "text"; ev: RunEvent & { k: "text" } }
   | { type: "tools"; items: { ev: RunEvent & { k: "tool" }; result?: RunEvent & { k: "tool_result" } }[] }
-  | { type: "delegate"; ev: RunEvent & { k: "delegate" }; result?: RunEvent & { k: "delegate_result" }; last?: WorkerAct; acts: number }
+  | { type: "delegate"; ev: RunEvent & { k: "delegate" }; result?: RunEvent & { k: "delegate_result" }; last?: WorkerAct; acts: number; detached?: boolean; ended?: string; endedT?: number }
   | { type: "verdict"; ev: RunEvent & { k: "verdict" } }
   | { type: "note"; ev: RunEvent & { k: "note" } }
   | { type: "result"; ev: RunEvent & { k: "result" } }
@@ -525,13 +527,27 @@ function buildChat(events: RunEvent[]): ChatItem[] {
   const out: ChatItem[] = [];
   const toolIdx = new Map<string, { ev: any; result?: any }>();
   const delIdx = new Map<string, ChatItem & { type: "delegate" }>();
+  const steerIdx = new Map<string, { acked: boolean }>();
   const stderrTail: string[] = [];
   for (const ev of events) {
     const last = out[out.length - 1];
     switch (ev.k) {
-      case "user":
-        out.push({ type: "user", ev });
+      case "user": {
+        const u = { type: "user" as const, ev, acked: false };
+        if (ev.sid) steerIdx.set(ev.sid, u);
+        out.push(u);
         break;
+      }
+      case "steer_ack": {
+        const u = steerIdx.get(ev.sid);
+        if (u) u.acked = true;
+        break;
+      }
+      case "delegate_detached": {
+        const d = delIdx.get(ev.id);
+        if (d) d.detached = true;
+        break;
+      }
       case "text":
         out.push({ type: "text", ev });
         break;
@@ -582,6 +598,11 @@ function buildChat(events: RunEvent[]): ChatItem[] {
         else out.push({ type: "stderr", lines: [ev.text] });
         break;
       case "exit":
+        // delegations still running when claude exited were killed with it
+        for (const d of delIdx.values()) if (!d.result && !d.ended) {
+          d.ended = ev.redirect ? "已打断" : ev.stopped ? "已停止" : "已中断";
+          d.endedT = ev.t;
+        }
         if (ev.stopped || (ev.code !== 0 && ev.code !== null) || !events.some((e) => e.k === "result" && e.seq < ev.seq))
           out.push({ type: "exit", ev, stderr: ev.stopped ? [] : [...stderrTail] });
         break;
@@ -684,6 +705,18 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
 }
 
 /** Attachments of a message; removable chips in the composer when onRemove is given. */
+/** Label on a message sent while Claude was working. */
+function SteerTag({ mode, acked, live }: { mode: "live" | "queued" | "redirect"; acked: boolean; live: boolean }) {
+  const kind = mode === "redirect" ? "打断并改向" : "任务中引导";
+  const state = acked ? "已送达" : !live ? "未送达" : mode === "live" ? "等 Claude 做完当前这一步" : mode === "redirect" ? "正在停止当前这一轮" : "排队中，本轮结束后送达";
+  return (
+    <div className={"steer-tag" + (acked ? " ok" : "")}>
+      <span className="steer-kind">{kind}</span>
+      <span className="steer-state">{acked ? "✓ " : ""}{state}</span>
+    </div>
+  );
+}
+
 function Attachments({ list, onRemove }: { list: Attachment[]; onRemove?: (a: Attachment) => void }) {
   const [big, setBig] = useState<string | null>(null);
   return (
@@ -734,8 +767,9 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
         switch (it.type) {
           case "user":
             return (
-              <div key={i} className="msg user">
+              <div key={i} className={"msg user" + (it.ev.steer ? " steer" : "")}>
                 <div className="bubble">
+                  {it.ev.steer && <SteerTag mode={it.ev.steer} acked={!!it.acked} live={props.running} />}
                   {it.ev.attachments?.length ? <Attachments list={it.ev.attachments} /> : null}
                   {it.ev.text}
                 </div>
@@ -766,8 +800,8 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
             );
           case "delegate": {
             const r = it.result;
-            const st = !r ? "running" : r.ok ? "done" : "failed";
-            const elapsed = r?.durationSec ?? (now - it.ev.t) / 1000;
+            const st = it.ended ? "cancelled" : !r ? "running" : r.ok ? "done" : r.status === "cancelled" ? "cancelled" : "failed";
+            const elapsed = r?.durationSec ?? ((it.endedT ?? now) - it.ev.t) / 1000;
             return (
               <div key={i} id={"del-" + it.ev.id} className={"delegate " + it.ev.who} style={acc(it.ev.who)}>
                 <div className="dhead">
@@ -776,7 +810,7 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
                     委派给 <b>{who(it.ev.who).name}</b>
                     {it.ev.mode ? <span className="mode">{it.ev.mode}</span> : null}
                   </span>
-                  <span className={"pill " + st}>{st === "running" ? "进行中" : st === "done" ? "完成" : DELEGATE_STATUS[r!.status] ?? "失败"}</span>
+                  <span className={"pill " + st}>{st === "running" ? "进行中" : st === "done" ? "完成" : it.ended ?? DELEGATE_STATUS[r!.status] ?? "失败"}</span>
                   <span className="dmeta">
                     {fmtSec(elapsed)}
                     {r ? ` · ${fmtTokens(r.tokens)} tokens · ${r.files.length} 个文件` : ""}
@@ -785,6 +819,7 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
                 {st === "running" && (
                   <div className="live">
                     <span className="spinner" />
+                    {it.detached ? <span className="act detached">⏸ 转到后台继续，Claude 正在看你的引导，决定继续等还是取消</span> : null}
                     {props.authWait?.(it.ev.who) && !it.last ? (
                       <span className="act error">⏸ 等待 {who(it.ev.who).name} 登录，登录后自动继续</span>
                     ) : false ? (
@@ -844,8 +879,8 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
           case "exit":
             return (
               <div key={i} className="exitbox">
-                <div className="resultbar bad">
-                  {it.ev.stopped ? "已手动停止（整个进程树已结束）" : it.ev.code === null ? "claude 没能启动" : `claude 异常退出（代码 ${it.ev.code}）`}
+                <div className={"resultbar " + (it.ev.redirect ? "steer" : "bad")}>
+                  {it.ev.redirect ? "已打断这一轮，按你的新消息继续" : it.ev.stopped ? "已手动停止（整个进程树已结束）" : it.ev.code === null ? "claude 没能启动" : `claude 异常退出（代码 ${it.ev.code}）`}
                 </div>
                 {it.stderr.length > 0 && <pre className="exit-stderr">{it.stderr.join("\n")}</pre>}
               </div>
@@ -960,7 +995,7 @@ function CardView({ c, now, quota, convRunning, authWait, projectId }: { c: Card
           <b>{c.label}</b>
           <span className="card-role">{WHO_SHORT[c.who] ?? who(c.who).role}</span>
         </div>
-        <span className={"pill " + c.status}>{c.status === "running" ? "进行中" : c.status === "done" ? "完成" : "失败"}</span>
+        <span className={"pill " + c.status}>{c.status === "running" ? (c.detached ? "后台进行中" : "进行中") : c.status === "done" ? "完成" : c.status === "cancelled" ? "已取消（因引导）" : "失败"}</span>
       </div>
       <div className="card-task" title={c.task}>
         {c.task.replace(/\s+/g, " ").slice(0, 160)}
@@ -1056,6 +1091,8 @@ function DispatchTree(props: { project: Project | null; meta: RunMeta; cards: Ca
         <Avatar who={c.who} size={18} />
         <span className="tlabel">{c.label}</span>
         <span className={"tdot " + c.status} />
+        {c.status === "cancelled" && <span className="tcancel">已取消（因引导）</span>}
+        {c.detached && c.status === "running" && <span className="tcancel">后台</span>}
         <span className="tmeta">{fmtSec(c.durationSec ?? ((c.endedAt ?? props.now) - c.startedAt) / 1000)}</span>
         {c.verdict && <span className={"tverdict " + (c.verdict.pass ? "pass" : "fail")}>{c.verdict.pass ? "✓" : "✗"}</span>}
       </button>
@@ -1520,7 +1557,7 @@ function AppInner() {
     }
     addStaged(res);
   };
-  const canAttach = !!project && !running;
+  const canAttach = !!project;
   // Options shown under the input: the draft choice for a new conversation, the conversation's own otherwise.
   const shownOpts: RunOptions = isNew || !meta ? opts : { ...DEFAULT_OPTS, ...meta.options };
   const changeOpts = (o: RunOptions) => {
@@ -1531,13 +1568,15 @@ function AppInner() {
   const lastDs = [...events].reverse().find((e) => e.k === "delegate_result" && e.who === "deepseek");
   const needGrant = !!lastDs && lastDs.k === "delegate_result" && /SANDBOX_ACL/.test(lastDs.error ?? "");
 
-  const send = async () => {
+  const send = async (mode: "steer" | "redirect" = "steer") => {
     const text = draft.trim();
     if ((!text && !att.length) || busy) return;
     setError(null);
     setBusy(true);
     try {
-      if (!isNew && !running) {
+      if (running && meta) {
+        await mao.steerRun(meta.id, text, att, mode);
+      } else if (!isNew) {
         await mao.sendMessage(meta!.id, text, att);
       } else if (isNew) {
         if (!project) throw new Error("请先在左侧选择或新建一个项目");
@@ -1580,7 +1619,7 @@ function AppInner() {
     : isNew
       ? "描述你的任务，例如：用 TypeScript 写一个命令行待办事项工具，支持 add/list/done，并配上单元测试"
       : running
-        ? "Claude 正在工作…"
+        ? "补充或纠正方向，Claude 做完当前这一步就会看到（Ctrl+Enter 引导）"
         : "继续对 Claude 说（会接着这个对话的上下文）";
 
   return (
@@ -1656,7 +1695,7 @@ function AppInner() {
           {att.length > 0 && <Attachments list={att} onRemove={(a) => setAtt((l) => l.filter((x) => x.path !== a.path))} />}
           <textarea
             value={draft}
-            disabled={running || !project}
+            disabled={!project}
             placeholder={placeholder}
             onChange={(e) => setDraft(e.target.value)}
             onPaste={(e) => {
@@ -1668,7 +1707,7 @@ function AppInner() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
-                send();
+                send("steer");
               }
             }}
           />
@@ -1677,13 +1716,21 @@ function AppInner() {
               📎
             </button>
             {project && <OptionsRow opts={shownOpts} setOpts={changeOpts} models={models} midway={!isNew} />}
-            <span className="hint" title="Ctrl+Enter 发送；可以 Ctrl+V 粘贴或拖入图片和文件">Ctrl+Enter 发送</span>
+            <span className="hint" title="Ctrl+Enter 发送；可以 Ctrl+V 粘贴或拖入图片和文件">{running ? "Ctrl+Enter 引导" : "Ctrl+Enter 发送"}</span>
             {running ? (
-              <button className="btn danger" onClick={() => meta && mao.stopRun(meta.id)}>
-                ■ 停止
-              </button>
+              <>
+                <button className="btn primary" onClick={() => send("steer")} disabled={(!draft.trim() && !att.length) || busy} title="不打断：Claude 做完当前这一步就会看到这条消息，并据此调整（正在运行的委派会先交还给 Claude 决定）">
+                  引导
+                </button>
+                <button className="btn" onClick={() => send("redirect")} disabled={(!draft.trim() && !att.length) || busy} title="立刻停止当前这一轮（保留对话上下文），然后按这条消息继续">
+                  打断并改向
+                </button>
+                <button className="btn danger" onClick={() => meta && mao.stopRun(meta.id)} title="停止任务">
+                  ■
+                </button>
+              </>
             ) : (
-              <button className="btn primary" onClick={send} disabled={(!draft.trim() && !att.length) || busy}>
+              <button className="btn primary" onClick={() => send()} disabled={(!draft.trim() && !att.length) || busy}>
                 {busy ? "启动中…" : isNew ? "开始" : "继续"}
               </button>
             )}

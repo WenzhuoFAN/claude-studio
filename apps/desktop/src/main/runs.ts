@@ -87,6 +87,18 @@ const GUI_RULES = `
 - 创建或修改文件用 Write / Edit 工具，不要用 shell 写文件。
 - 想知道退出码就单独运行那条命令，工具结果里会显示是否出错。`;
 
+const STEER_RULES = `
+[任务中引导] 用户可以在你工作时发消息引导你（消息以「[任务中引导]」开头，在你当前这一步完成后送到）。收到后：
+- 先重新规划：引导优先于原计划；它改变了需求就按新需求做，不要把原计划做完再说。
+- 正在后台运行的委派（工具结果里的 DETACHED 提示）：引导让它过时 → cancel_delegation 取消，检查它已经改过的文件，再按新要求重新委派；不受影响 → wait_delegation 继续等。已经完成的委派如果被引导推翻，同样要返工。
+- 在你的下一段回复里先用一两句话确认你收到了什么、计划怎么调整。
+- 本轮结束前，后台委派必须都等完或取消。
+- 「[打断并改向]」表示用户中途停止了你上一轮的工作：上一轮可能只做了一半（文件可能改了一部分，委派已被终止），先检查现状再按新要求继续。`;
+
+const STEER_LIVE = "[任务中引导] 用户在你工作时发来补充 / 纠正：\n";
+const STEER_QUEUED = "[任务中引导] 用户在你上一轮工作时发来的补充（上一轮已结束才送达）：\n";
+const STEER_REDIRECT = "[打断并改向] 用户打断了你上一轮的工作（已在中途停止），要求改为：\n";
+
 const ATTACH_RULES = `
 [附件] 用户可能在消息里附带图片或文件。它们保存在下面的附件文件夹里（应用数据目录，不在项目文件夹里），你可以用 Read 读取（含图片、PDF）。
 - 不要修改或删除附件；需要把附件放进项目时，先问用户或在回复里说明。
@@ -171,6 +183,19 @@ function parseDelegateResult(text: string) {
 interface Active {
   child: ChildProcess;
   stopped: boolean;
+  /** stdin still open: more user messages can go straight into the running turn */
+  open: boolean;
+  /** user messages written to stdin and not yet echoed back by claude (null = the turn's own message) */
+  unacked: ({ text: string; files: Attachment[]; sid: string } | null)[];
+  /** steering messages to send as the next turn once this process has exited */
+  after: { text: string; files: Attachment[]; sid: string }[];
+  /** the process was stopped to deliver `after` right away (打断并改向) */
+  redirect: boolean;
+}
+
+interface SteerTurn {
+  sids: string[];
+  redirect: boolean;
 }
 
 export class RunManager extends EventEmitter {
@@ -307,6 +332,68 @@ export class RunManager extends EventEmitter {
     this.saveMeta({ ...m, options });
   }
 
+  /**
+   * A message while Claude is working.
+   * steer: written into the running turn (claude reads it after its current step);
+   *        if the turn is already finishing it is sent as the next turn instead.
+   * redirect: stop the current turn now and resume the conversation with this message.
+   */
+  steer(id: string, text: string, attachments: Attachment[] | undefined, mode: "steer" | "redirect") {
+    const m = this.meta(id);
+    if (!m) throw new Error("没有这个对话");
+    if (!text.trim() && !attachments?.length) throw new Error("消息不能为空");
+    const a = this.active.get(id);
+    if (!a) {
+      // It finished in the meantime: an ordinary follow-up.
+      if (m.sessionId) return this.send(id, text, attachments);
+      throw new Error("任务已经结束");
+    }
+    const files = adopt(id, attachments);
+    const sid = newId();
+    const att = files.length ? { attachments: files } : {};
+    if (mode === "steer" && a.open && !a.stopped) {
+      this.push(id, { k: "user", text, ...att, steer: "live", sid });
+      a.unacked.push({ text, files, sid });
+      a.child.stdin!.write(this.userMessage(STEER_LIVE + (text.trim() || "（见附件）"), files), "utf8");
+      // Tell the bridge: a delegation that is still running hands control back so Claude sees this now.
+      const f = path.join(this.dir(id), "steer.json");
+      let seq = 0;
+      try {
+        seq = Number(JSON.parse(readFileSync(f, "utf8")).seq) || 0;
+      } catch {
+        /* first steer */
+      }
+      writeFileSync(f, JSON.stringify({ seq: seq + 1, at: Date.now() }));
+      return;
+    }
+    this.push(id, { k: "user", text, ...att, steer: mode === "redirect" ? "redirect" : "queued", sid });
+    a.after.push({ text, files, sid });
+    if (mode === "redirect" && !a.stopped) {
+      a.redirect = true;
+      this.stop(id);
+    }
+  }
+
+  /** One stream-json user message: images as image blocks, then the text (with the attachment list). */
+  private userMessage(text: string, files: Attachment[]): string {
+    const images = files.filter((f) => f.image);
+    const note = files.length
+      ? `\n\n[附件] 用户随这条消息附带了 ${files.length} 个文件（已复制到应用的附件文件夹，不在项目里）${images.length ? "；图片已直接附在这条消息里" : ""}：\n` +
+        files.map((f) => `- ${f.name}（${fmtSize(f.size)}${f.image ? "，图片" : ""}）：${f.path}`).join("\n") +
+        (files.some((f) => !f.image) ? "\n需要时用 Read 工具读取这些文件（PDF 也可以直接 Read）。" : "")
+      : "";
+    const content: any[] = [];
+    for (const f of images) {
+      try {
+        content.push({ type: "image", source: { type: "base64", media_type: f.mime, data: readFileSync(f.path).toString("base64") } });
+      } catch {
+        /* unreadable now: the path in the text still points at it */
+      }
+    }
+    content.push({ type: "text", text: text + note });
+    return JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+  }
+
   stop(id: string) {
     const a = this.active.get(id);
     if (!a) return;
@@ -318,10 +405,12 @@ export class RunManager extends EventEmitter {
     for (const id of this.active.keys()) this.stop(id);
   }
 
-  private spawnClaude(id: string, text: string, first: boolean, files: Attachment[] = []) {
+  private spawnClaude(id: string, text: string, first: boolean, files: Attachment[] = [], steer?: SteerTurn) {
     const meta = this.meta(id)!;
     const claude = locateClaude();
-    this.push(id, files.length ? { k: "user", text, attachments: files } : { k: "user", text });
+    // Steering messages were shown when the user sent them; now they are delivered.
+    if (steer) for (const sid of steer.sids) this.push(id, { k: "steer_ack", sid });
+    else this.push(id, files.length ? { k: "user", text, attachments: files } : { k: "user", text });
     if (!claude) {
       this.push(id, { k: "stderr", text: "找不到 claude.exe。请确认 Claude Code 已安装，或设置环境变量 CLAUDE_PATH。" });
       this.push(id, { k: "exit", code: null, stopped: false });
@@ -330,6 +419,8 @@ export class RunManager extends EventEmitter {
     }
     const runDir = this.dir(id);
     const attDir = runAttachDir(id);
+    // Always readable: a steering message sent mid-turn may bring the first attachments.
+    mkdirSync(attDir, { recursive: true });
     // Per-run MCP config: absolute bridge path, worker logs go into this run's folder.
     const mcpFile = path.join(runDir, "mcp.json");
     writeFileSync(
@@ -365,7 +456,9 @@ export class RunManager extends EventEmitter {
       }),
     );
     const allowed: string[] = JSON.parse(readFileSync(ALLOWED_TOOLS, "utf8"));
-    const args = ["-p", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile, "--strict-mcp-config", "--permission-mode", "dontAsk", "--allowedTools", ...allowed];
+    // stream-json in both directions: stdin stays open for steering messages; claude echoes each
+    // user message back (--replay-user-messages) when it actually reads it.
+    const args = ["-p", "--input-format", "stream-json", "--replay-user-messages", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile, "--strict-mcp-config", "--permission-mode", "dontAsk", "--allowedTools", ...allowed];
     if (!first && meta.sessionId) args.push("--resume", meta.sessionId);
     // Per-conversation choice (composer), else 设置 (conversations from before 1.1.1 have no choice stored).
     const st = this.ctx.settings();
@@ -376,12 +469,9 @@ export class RunManager extends EventEmitter {
     if (effort) args.push("--effort", effort);
     // Earlier and current attachments of this conversation are readable (Read tool) on every turn.
     if (existsSync(attDir)) args.push("--add-dir", attDir);
-    // Images go in as real image content: one stream-json user message instead of a plain-text prompt.
-    const images = files.filter((f) => f.image);
-    if (images.length) args.push("--input-format", "stream-json");
 
     const inRepo = (path.resolve(meta.workdir) + path.sep).toLowerCase().startsWith((path.resolve(ROOT) + path.sep).toLowerCase());
-    let sys = GUI_RULES + teamRoster(this.ctx.agents(), st.dshCommands !== false);
+    let sys = GUI_RULES + STEER_RULES + teamRoster(this.ctx.agents(), st.dshCommands !== false);
     if (st.dshCommands !== false) sys += "\n" + DSH_RULES;
     if (meta.projectId) sys += "\n" + COLLAB_RULES + `\n你的对话编号：${meta.id}`;
     if (meta.options?.splitSmall) sys += "\n" + SPLIT_RULE;
@@ -391,28 +481,11 @@ export class RunManager extends EventEmitter {
     if (!inRepo) sys = readFileSync(CLAUDE_MD, "utf8") + "\n" + sys;
     args.push("--append-system-prompt", sys);
 
-    const attachNote = files.length
-      ? `\n\n[附件] 用户随这条消息附带了 ${files.length} 个文件（已复制到应用的附件文件夹，不在项目里）${images.length ? "；图片已直接附在这条消息里" : ""}：\n` +
-        files.map((f) => `- ${f.name}（${fmtSize(f.size)}${f.image ? "，图片" : ""}）：${f.path}`).join("\n") +
-        (files.some((f) => !f.image) ? "\n需要时用 Read 工具读取这些文件（PDF 也可以直接 Read）。" : "")
-      : "";
-    const body = (text.trim() || "（见附件）") + attachNote;
+    const body = (steer ? (steer.redirect ? STEER_REDIRECT : STEER_QUEUED) : "") + (text.trim() || "（见附件）");
     const prompt = first
       ? `${body}\n\n工作目录（所有文件都放在这里；委派时 cwd 一律用这个绝对路径）：${meta.workdir}\n请按 CLAUDE.md 的分工规则执行：先规划，再委派给 Codex / DeepSeek，逐个审查结果并运行测试，最后给出分工总结。`
       : body;
-    let stdinText = prompt;
-    if (images.length) {
-      const content: any[] = [];
-      for (const f of images) {
-        try {
-          content.push({ type: "image", source: { type: "base64", media_type: f.mime, data: readFileSync(f.path).toString("base64") } });
-        } catch {
-          /* unreadable now: the path in the text still points at it */
-        }
-      }
-      content.push({ type: "text", text: prompt });
-      stdinText = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
-    }
+    const stdinText = this.userMessage(prompt, files);
 
     const child = spawn(claude, args, {
       cwd: meta.workdir,
@@ -420,7 +493,7 @@ export class RunManager extends EventEmitter {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const act: Active = { child, stopped: false };
+    const act: Active = { child, stopped: false, open: true, unacked: [null], after: [], redirect: false };
     this.active.set(id, act);
     this.bump(id, null, 0);
     updateBoard(meta, (c) => {
@@ -450,6 +523,17 @@ export class RunManager extends EventEmitter {
     let buf = "";
     let gotResult = false;
     let lastResultText = "";
+    let closeTimer: NodeJS.Timeout | undefined;
+    // bridge delegation id (d3) -> tool_use id of its card, for delegations moved to the background
+    const background = new Map<string, string>();
+    const finishDelegate = (tid: string, who: Worker, txt: string, isError: boolean) => {
+      const r = parseDelegateResult(txt);
+      this.bump(id, who, -1);
+      const m = this.meta(id)!;
+      this.saveMeta({ ...m, tokens: { ...m.tokens, [who]: (m.tokens?.[who] ?? 0) + (r.tokens ?? 0) } });
+      this.emit("workerDone", who);
+      this.push(id, { k: "delegate_result", id: tid, who, ok: !isError && r.status === "completed", ...r });
+    };
 
     const onLine = (line: string) => {
       if (!line.trim()) return;
@@ -497,18 +581,32 @@ export class RunManager extends EventEmitter {
             }
           }
         }
+      } else if (ev.type === "user" && ev.isReplay) {
+        // claude has read one of our stdin messages (in order).
+        const u = act.unacked.shift();
+        if (u) this.push(id, { k: "steer_ack", sid: u.sid });
+        clearTimeout(closeTimer);
       } else if (ev.type === "user") {
         for (const c of ev.message?.content ?? []) {
           if (c.type !== "tool_result") continue;
           const txt = resultText(c.content);
           const who = delegates.get(c.tool_use_id);
-          if (who) {
-            const r = parseDelegateResult(txt);
-            this.bump(id, who, -1);
-            const m = this.meta(id)!;
-            this.saveMeta({ ...m, tokens: { ...m.tokens, [who]: (m.tokens?.[who] ?? 0) + (r.tokens ?? 0) } });
-            this.emit("workerDone", who);
-            this.push(id, { k: "delegate_result", id: c.tool_use_id, who, ok: !c.is_error && r.status === "completed", ...r });
+          // A delegation moved to the background so Claude could read a steering message.
+          const det = who ? txt.match(/^DETACHED delegation: (d\d+)/) : null;
+          if (det) {
+            background.set(det[1], c.tool_use_id);
+            this.push(id, { k: "delegate_detached", id: c.tool_use_id, bg: det[1] });
+            continue;
+          }
+          // Its final result, returned later by wait_delegation / cancel_delegation.
+          const late = !who ? txt.match(/(?:^|\n)delegation: (d\d+)\nagent:/) : null;
+          const lateId = late ? background.get(late[1]) : undefined;
+          if (lateId) {
+            background.delete(late![1]);
+            this.push(id, { k: "tool_result", id: c.tool_use_id, isError: !!c.is_error && !/status: cancelled/.test(txt), preview: clip(txt, 300) });
+            finishDelegate(lateId, delegates.get(lateId)!, txt.slice(txt.indexOf("agent:")), !!c.is_error);
+          } else if (who) {
+            finishDelegate(c.tool_use_id, who, txt, !!c.is_error);
           } else if (txt || c.is_error) {
             this.push(id, { k: "tool_result", id: c.tool_use_id, isError: !!c.is_error, preview: clip(txt, 300) });
           }
@@ -532,7 +630,18 @@ export class RunManager extends EventEmitter {
         });
         const m = this.meta(id)!;
         this.saveMeta({ ...m, costUsd: (m.costUsd ?? 0) + (ev.total_cost_usd ?? 0), tokens: { ...m.tokens, claude: (m.tokens?.claude ?? 0) + turnTokens } });
+        // Turn over. Nothing unread on stdin → close it so claude exits. Otherwise claude starts
+        // another turn with the unread message (its echo cancels the fallback below).
+        if (!act.unacked.length) closeStdin();
+        else closeTimer = setTimeout(closeStdin, 20_000);
       }
+    };
+    const closeStdin = () => {
+      if (!act.open) return;
+      act.open = false;
+      // Never read by claude: deliver as the next turn instead.
+      for (const u of act.unacked.splice(0)) if (u) act.after.push(u);
+      child.stdin!.end();
     };
 
     child.stdout!.setEncoding("utf8");
@@ -557,7 +666,7 @@ export class RunManager extends EventEmitter {
       this.active.delete(id);
       this.busy.delete(id);
       this.emit("activity", this.activity());
-      this.push(id, { k: "exit", code, stopped: act.stopped });
+      this.push(id, { k: "exit", code, stopped: act.stopped, ...(act.redirect ? { redirect: true } : {}) });
       const status = act.stopped ? "stopped" : code === 0 && gotResult ? "done" : "failed";
       if (status === "failed") {
         let errText = "";
@@ -576,8 +685,28 @@ export class RunManager extends EventEmitter {
         delete c.waitingFor;
         c.planStep = status === "done" ? "已完成" : status === "stopped" ? "已停止" : "已失败";
       });
+      // Steering messages that did not get into this process: deliver them as the next turn
+      // (unless the user stopped the task outright).
+      clearTimeout(closeTimer);
+      for (const u of act.unacked.splice(0)) if (u) act.after.push(u);
+      const next = act.after.splice(0);
+      const sessionId = this.meta(id)!.sessionId;
+      if (next.length && (!act.stopped || act.redirect)) {
+        if (!sessionId) {
+          this.push(id, { k: "stderr", text: "引导消息没能送达：这个对话还没有可继续的会话。请重新发送。" });
+          return;
+        }
+        this.saveMeta({ ...this.meta(id)!, status: "running", endedAt: undefined });
+        this.spawnClaude(
+          id,
+          next.map((n) => n.text.trim()).filter(Boolean).join("\n\n"),
+          false,
+          next.flatMap((n) => n.files),
+          { sids: next.map((n) => n.sid), redirect: act.redirect },
+        );
+      }
     });
     child.stdin!.on("error", () => {});
-    child.stdin!.end(stdinText, "utf8");
+    child.stdin!.write(stdinText, "utf8");
   }
 }

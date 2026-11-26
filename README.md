@@ -98,6 +98,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
 - 附件复制到 `%APPDATA%\Claude 的工作室\attachments\<对话编号>\`（保留原文件名），**不会放进项目文件夹**；这个文件夹通过 `--add-dir` 交给 Claude，续聊时以前的附件也能读。
 - 委派时 Claude 会把附件路径写进任务：Codex 可以读这个文件夹，图片还能通过 `images` 参数直接给 Codex 看；DeepSeek 的沙箱会额外放行这个文件夹（`--add-dir`）；其他智能体由 Claude 把需要的内容写进任务。
 
+### 任务中发消息引导
+
+Claude 工作时输入框不再锁住，可以随时补充或纠正方向：
+
+- **引导**（Ctrl+Enter）：不打断，Claude 做完当前这一步就会看到这条消息并调整计划。消息在对话里显示为虚线气泡，标着「任务中引导」和状态（等 Claude 做完当前这一步 → ✓ 已送达）。可以带图片和文件。
+- **打断并改向**：立刻停止当前这一轮（保留对话上下文），然后按这条消息继续。适合方向完全错了、不想等它做完当前步骤的时候。
+- **■**：停止任务。
+- 引导送到时如果有委派正在运行（Codex / DeepSeek 等），这次委派会**转到后台继续跑**，先把控制权交还给 Claude：Claude 看完引导后决定继续等它（`wait_delegation`），还是取消（`cancel_delegation`）并按新要求重新委派。被取消的委派在卡片和树状图上显示「已取消（因引导）」。
+- 如果引导到达时这一轮刚好在收尾，它会排队，本轮结束后自动作为下一条消息发出（显示「排队中，本轮结束后送达」）。
+
 ### DeepSeek 执行命令（受 Claude 监管）
 
 DeepSeek 现在可以跑构建 / 测试等命令（设置 → DeepSeek 执行命令，默认开启）：
@@ -244,6 +254,7 @@ claude-studio/
 - **DeepSeek 的沙箱不允许带 IPC 的子进程**（`fork`）：`node --test` 默认会报 `spawn EPERM`，要用 `node --test --experimental-test-isolation=none`（已写进给它的提示）；jest / vitest 这类开 worker 的测试框架在它那里可能跑不了，这时由 Claude 来跑测试。
 - Codex 沙箱默认不联网；需要 `npm install` 时 Claude 会传 `allowNetwork: true`（npm 缓存放在工作目录的 `.npm-cache`）。
 
+- **任务中引导要等 Claude 做完当前这一步**：Claude 正在长时间思考或执行一条命令时，引导消息要等这一步结束才送到（委派除外：委派会转到后台，引导马上送到）。急的话用「打断并改向」。
 - Claude Code 等待一次委派的上限由 `MCP_TOOL_TIMEOUT` 控制，脚本已设为“委派超时 + 2 分钟”。
 - 改动文件是通过委派前后对目录做快照比较得出的（跳过 node_modules/.git/dist），超大目录会慢一点。
 - dsh 会自动读取上级目录的 CLAUDE.md；bridge 在每个任务前加了“你是执行者、不要再委派”的说明，CLAUDE.md 顶部也写了这句。

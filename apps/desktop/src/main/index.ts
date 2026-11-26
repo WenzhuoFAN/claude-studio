@@ -364,6 +364,9 @@ function registerIpc() {
   ipcMain.handle("codexModels", () => codexModels());
   ipcMain.handle("buildBridge", () => buildBridge());
   ipcMain.handle("sendMessage", (_e, id: string, text: string, attachments?: Attachment[]) => runs.send(id, text, attachments));
+  ipcMain.handle("steerRun", (_e, id: string, text: string, attachments: Attachment[] | undefined, mode: string) =>
+    runs.steer(id, String(text ?? ""), attachments, mode === "redirect" ? "redirect" : "steer"),
+  );
   ipcMain.handle("stopRun", (_e, id: string) => runs.stop(id));
   ipcMain.handle("openPath", (_e, p: string) => {
     if (existsSync(p)) shell.openPath(p);
