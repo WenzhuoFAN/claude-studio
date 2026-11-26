@@ -60,6 +60,8 @@ export type RunEventBody =
       files: string[];
       error?: string;
       answer: string;
+      /** model the agent used ("默认" = its own default) */
+      model?: string;
     }
   | { k: "verdict"; pass: boolean; text: string }
   /** A note / priority decision from another conversation of the same project. */
@@ -224,6 +226,9 @@ export interface MaoApi {
   removeAgent(id: string): Promise<void>;
   setAgentAvatar(id: string, pngDataUrl: string): Promise<void>;
   testAgent(def: AgentDef, apiKey?: string | null): Promise<AgentTestResult>;
+  /** 设置 → 各智能体默认模型 */
+  setAgentDefaults(id: string, model: string | null, effort: string | null): Promise<AgentDef>;
+  agentModels(id: string): Promise<{ models: string[]; error?: string }>;
   onAgentsChanged(cb: (agents: AgentDef[]) => void): () => void;
   pickImage(): Promise<string | null>;
   pickExecutable(): Promise<string | null>;

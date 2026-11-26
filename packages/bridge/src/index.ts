@@ -175,6 +175,7 @@ server.registerTool(
       task: z.string().min(1).describe("Complete, self-contained instructions for DeepSeek"),
       cwd: z.string().describe("Absolute path of the working directory"),
       timeoutSec: z.number().int().positive().max(3600).optional().describe("Kill after this many seconds (default 900)"),
+      model: z.string().optional().describe("DeepSeek model (deepseek-flash / deepseek-v4-pro). Omit to use the user's default"),
     },
   },
   (args) => track("DeepSeek", async () => toolResult(await delegateToDeepseek(args))),
@@ -215,7 +216,7 @@ server.registerTool(
     track(agentId, async () => {
       const def = readAgents().find((a) => a.id === agentId);
       if (agentId === "codex" || def?.builtin === "codex") return toolResult(await delegateToCodex({ task, cwd, mode: mode ?? "workspace-write", model, timeoutSec }));
-      if (agentId === "deepseek" || def?.builtin === "deepseek") return toolResult(await delegateToDeepseek({ task, cwd, timeoutSec }));
+      if (agentId === "deepseek" || def?.builtin === "deepseek") return toolResult(await delegateToDeepseek({ task, cwd, timeoutSec, model }));
       if (!def) return toolError(`没有 id 为 ${agentId} 的智能体。可用：${readAgents().map((a) => a.id).join(", ")}`);
       if (!def.enabled) return toolError(`智能体 ${def.name} 已被用户停用`);
       const dir = checkCwd(cwd);

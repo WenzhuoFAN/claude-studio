@@ -170,6 +170,7 @@ function parseDelegateResult(text: string) {
   const errs = text.match(/^errors:\n((?:  .*\n?)*)/m);
   const answer = text.split("----- final answer -----")[1]?.trim() ?? "";
   const bridgeErr = text.startsWith("bridge error:") ? text : undefined;
+  const model = text.match(/^model:\s*(.+)$/m)?.[1]?.trim();
   return {
     status: head?.[2] ?? (bridgeErr ? "error" : "unknown"),
     durationSec: head ? Number(head[3]) : undefined,
@@ -177,6 +178,7 @@ function parseDelegateResult(text: string) {
     files,
     error: bridgeErr ?? errs?.[1]?.trim(),
     answer,
+    ...(model ? { model } : {}),
   };
 }
 
@@ -475,6 +477,7 @@ export class RunManager extends EventEmitter {
     if (st.dshCommands !== false) sys += "\n" + DSH_RULES;
     if (meta.projectId) sys += "\n" + COLLAB_RULES + `\n你的对话编号：${meta.id}`;
     if (meta.options?.splitSmall) sys += "\n" + SPLIT_RULE;
+    sys += "\n[模型] 每个智能体的默认模型由用户在设置里选定；委派时不要传 model 参数，除非用户在对话里明确要求某个模型。";
     if (meta.options?.codexModel || meta.options?.codexEffort)
       sys += `\n[Codex 设置] 用户已为 Codex 选定模型 ${meta.options.codexModel || "默认"}、推理强度 ${meta.options.codexEffort || "默认"}；调用 delegate_to_codex 时不要传 model / reasoningEffort 参数。`;
     if (existsSync(attDir)) sys += "\n" + ATTACH_RULES + `\n本对话的附件文件夹：${attDir}`;

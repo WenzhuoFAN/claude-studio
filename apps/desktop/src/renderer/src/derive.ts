@@ -22,6 +22,8 @@ export interface Card {
   liveTokens?: number;
   /** "Codex 单元 2", "DeepSeek 修复 #2" … */
   label: string;
+  /** model the agent used */
+  model?: string;
   /** set when this delegation re-sends an earlier one for fixes */
   parentId?: string;
 }
@@ -89,6 +91,7 @@ export function deriveCards(events: RunEvent[]): Card[] {
         files: ev.files,
         error: ev.error,
         answer: ev.answer,
+        model: ev.model,
       });
     } else if (ev.k === "verdict") {
       // Attach to the most recent finished card that has no verdict yet.

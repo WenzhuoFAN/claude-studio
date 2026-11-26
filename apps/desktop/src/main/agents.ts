@@ -84,6 +84,16 @@ export class AgentStore extends EventEmitter {
       ds.canRun = true;
       if (ds.role === "更便宜：样板代码、单元测试、文档、第二意见代码评审（本机上不能运行命令）") ds.role = BUILTINS[1].role;
     }
+    // 1.1.3: a model hard-coded in a CLI agent's args ("-m gemini-3-flash-preview") becomes its default model,
+    // so it can be changed in 设置 → 各智能体默认模型.
+    for (const a of list) {
+      if (a.type !== "cli" || !a.cli?.args || a.cli.args.includes("{model}") || a.defaultModel) continue;
+      const m = a.cli.args.match(/(^|\s)(-m|--model)(\s+|=)("?)([\w.:\/-]+)\4(?=\s|$)/);
+      if (m) {
+        a.defaultModel = m[5];
+        a.cli.args = a.cli.args.replace(m[0], `${m[1]}${m[2]} {model}`);
+      }
+    }
     // Built-ins first (Codex, DeepSeek), then the user's agents in the order they were added.
     const rank = (a: AgentDef) => (a.builtin ? BUILTINS.findIndex((b) => b.id === a.id) : 100);
     this.list = list.map((a, i) => ({ a, i })).sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i).map((x) => x.a);
@@ -139,6 +149,8 @@ export class AgentStore extends EventEmitter {
         avatar: def.avatar ?? old?.avatar,
         cli: def.type === "cli" ? def.cli : undefined,
         openai: def.type === "openai" ? { baseUrl: def.openai!.baseUrl.trim().replace(/\/+$/, ""), model: def.openai!.model.trim() } : undefined,
+        defaultModel: def.type === "cli" ? def.defaultModel?.trim() || undefined : undefined,
+        defaultEffort: def.defaultEffort?.trim() || undefined,
       };
       if (old) Object.assign(old, next);
       else this.list.push(next);
@@ -146,6 +158,26 @@ export class AgentStore extends EventEmitter {
     if (apiKey !== undefined) this.setSecret(id, apiKey);
     this.save();
     return { ...this.get(id)! };
+  }
+
+  /** 设置 → 各智能体默认模型. API agents keep their model in openai.model (it cannot be empty). */
+  setDefaults(id: string, model?: string | null, effort?: string | null) {
+    const a = this.get(id);
+    if (!a) throw new Error("没有这个智能体");
+    // undefined / null = keep the current value
+    const m = model == null ? (a.type === "openai" ? (a.openai?.model ?? "") : (a.defaultModel ?? "")) : model.trim();
+    const e = effort == null ? (a.defaultEffort ?? "") : effort.trim();
+    if (m && !/^[\w.:\/@-]{1,120}$/.test(m)) throw new Error("模型名只能包含字母、数字和 . : / @ - _");
+    if (e && !/^[a-z]{1,20}$/.test(e)) throw new Error("思考等级无效");
+    if (a.type === "openai") {
+      if (!m) throw new Error("API 智能体必须填写模型名");
+      a.openai!.model = m;
+    } else {
+      a.defaultModel = m || undefined;
+    }
+    a.defaultEffort = e || undefined;
+    this.save();
+    return { ...a };
   }
 
   remove(id: string) {

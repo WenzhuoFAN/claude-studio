@@ -813,7 +813,7 @@ function ChatView(props: { events: RunEvent[]; running: boolean; meta: RunMeta |
                   <span className={"pill " + st}>{st === "running" ? "进行中" : st === "done" ? "完成" : it.ended ?? DELEGATE_STATUS[r!.status] ?? "失败"}</span>
                   <span className="dmeta">
                     {fmtSec(elapsed)}
-                    {r ? ` · ${fmtTokens(r.tokens)} tokens · ${r.files.length} 个文件` : ""}
+                    {r ? ` · ${fmtTokens(r.tokens)} tokens · ${r.files.length} 个文件${r.model ? ` · ${r.model}` : ""}` : ""}
                   </span>
                 </div>
                 {st === "running" && (
@@ -996,6 +996,7 @@ function CardView({ c, now, quota, convRunning, authWait, projectId }: { c: Card
           <span className="card-role">{WHO_SHORT[c.who] ?? who(c.who).role}</span>
         </div>
         <span className={"pill " + c.status}>{c.status === "running" ? (c.detached ? "后台进行中" : "进行中") : c.status === "done" ? "完成" : c.status === "cancelled" ? "已取消（因引导）" : "失败"}</span>
+        {c.model && <span className="mtag" title="使用的模型">{c.model}</span>}
       </div>
       <div className="card-task" title={c.task}>
         {c.task.replace(/\s+/g, " ").slice(0, 160)}
@@ -1090,6 +1091,7 @@ function DispatchTree(props: { project: Project | null; meta: RunMeta; cards: Ca
       <button className={"tnode " + c.status} onClick={() => jump(c.id)} title={c.task.slice(0, 300)}>
         <Avatar who={c.who} size={18} />
         <span className="tlabel">{c.label}</span>
+        {c.model && <span className="tmodel">{c.model}</span>}
         <span className={"tdot " + c.status} />
         {c.status === "cancelled" && <span className="tcancel">已取消（因引导）</span>}
         {c.detached && c.status === "running" && <span className="tcancel">后台</span>}

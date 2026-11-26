@@ -324,8 +324,12 @@ export function AgentEditor({ initial, onClose }: { initial: AgentDef | null; on
                   </div>
                 </label>
                 <label className="field">
-                  <span>参数模板（可用 {"{task}"} {"{cwd}"} {"{model}"}；含空格的参数用双引号）</span>
-                  <input value={d.cli!.args} onChange={(e) => setCli({ args: e.target.value })} placeholder='例如：run --json --dir "{cwd}" -' />
+                  <span>参数模板（可用 {"{task}"} {"{cwd}"} {"{model}"} {"{effort}"}；含空格的参数用双引号）</span>
+                  <input value={d.cli!.args} onChange={(e) => setCli({ args: e.target.value })} placeholder='例如：run --json -m {model} --dir "{cwd}" -' />
+                </label>
+                <label className="field">
+                  <span>默认模型（填进 {"{model}"}；留空时连同前面的 -m 一起省略，用它自己的默认）</span>
+                  <input value={d.defaultModel ?? ""} onChange={(e) => set({ defaultModel: e.target.value })} placeholder="例如：gemini-3-flash-preview" />
                 </label>
                 <div className="row wrap">
                   <label className="field inline">
@@ -402,6 +406,162 @@ export function AgentEditor({ initial, onClose }: { initial: AgentDef | null; on
   );
 }
 
+
+// ------------------------------------------------------------------ 各智能体默认模型
+const CLAUDE_MODEL_LIST = ["opus", "sonnet", "fable", "haiku"];
+const DSH_EFFORTS = ["off", "low", "medium", "high"];
+const API_EFFORTS = ["low", "medium", "high"];
+const effortText = (x: string) => (x === "off" ? "关闭思考" : (EFFORT_TEXT[x] ?? x));
+
+/** A model choice: 默认 / known models / 自定义 (free text). */
+function ModelPicker(props: { value: string; options: { value: string; label?: string }[]; onChange: (v: string) => void; allowDefault?: boolean; disabled?: boolean; title?: string }) {
+  const { value, options, onChange, allowDefault = true } = props;
+  const known = options.some((o) => o.value === value) || (!value && allowDefault);
+  const [custom, setCustom] = useState(!known);
+  const [txt, setTxt] = useState(value);
+  useEffect(() => {
+    setTxt(value);
+    // the model list arrives after the first render: re-decide once it (or the value) changes
+    setCustom(!!value && !options.some((o) => o.value === value));
+  }, [value, options.map((o) => o.value).join("|")]);
+  const commit = () => {
+    const t = txt.trim();
+    if (t !== value) onChange(t);
+  };
+  return (
+    <div className="mpick" title={props.title}>
+      <select
+        value={custom ? "__custom" : value}
+        disabled={props.disabled}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "__custom") setCustom(true);
+          else {
+            setCustom(false);
+            onChange(v);
+          }
+        }}
+      >
+        {allowDefault && <option value="">默认（由该智能体决定）</option>}
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label ?? o.value}
+          </option>
+        ))}
+        <option value="__custom">自定义…</option>
+      </select>
+      {custom && !props.disabled && (
+        <input
+          value={txt}
+          placeholder="输入模型名，回车保存"
+          onChange={(e) => setTxt(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+        />
+      )}
+    </div>
+  );
+}
+
+function EffortPicker(props: { value: string; options: string[]; onChange: (v: string) => void; disabled?: boolean; title?: string }) {
+  return (
+    <select className="epick" value={props.disabled ? "" : props.value} disabled={props.disabled} title={props.title} onChange={(e) => props.onChange(e.target.value)}>
+      <option value="">{props.disabled ? "不支持" : "默认"}</option>
+      {props.options.map((x) => (
+        <option key={x} value={x}>
+          {effortText(x)}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function AgentModelsSection(props: { s: Settings; saveSettings: (p: Partial<Settings>) => Promise<void>; agents: AgentDef[]; codexModels: CodexModel[] }) {
+  const { s, agents, codexModels } = props;
+  const [lists, setLists] = useState<Record<string, { models: string[]; error?: string }>>({});
+  const [msg, setMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null);
+  const others = agents.filter((a) => a.builtin !== "codex");
+  useEffect(() => {
+    for (const a of others) mao.agentModels(a.id).then((r) => setLists((x) => ({ ...x, [a.id]: r })));
+  }, [others.map((a) => a.id + (a.openai?.baseUrl ?? "")).join("|")]);
+
+  const done = (id: string, p: Promise<unknown>) =>
+    p.then(
+      () => setMsg({ id, ok: true, text: "已保存，下次委派生效" }),
+      (e) => setMsg({ id, ok: false, text: cleanError(e) }),
+    );
+  const codexModel = codexModels.find((m) => m.slug === s.codexModel);
+  const note = (id: string) => (msg?.id === id ? <span className={"small " + (msg.ok ? "ok-text" : "bad-text")}>{msg.text}</span> : null);
+
+  return (
+    <section>
+      <h3>各智能体默认模型</h3>
+      <p className="muted small">每个成员默认用哪个模型、思考多深。Claude 和 Codex 在对话输入框下方还能按对话单独切换；其他成员都用这里的设置（Claude 委派时不会自己改模型，除非你在对话里要求）。</p>
+      <div className="amodels">
+        <div className="amodel">
+          <Avatar who="claude" size={30} />
+          <b>Claude</b>
+          <ModelPicker value={s.claudeModel} options={CLAUDE_MODEL_LIST.map((m) => ({ value: m, label: m[0].toUpperCase() + m.slice(1) }))} onChange={(v) => done("claude", props.saveSettings({ claudeModel: v }))} />
+          <EffortPicker value={s.claudeEffort} options={CLAUDE_EFFORTS} onChange={(v) => done("claude", props.saveSettings({ claudeEffort: v }))} title="Claude 思考等级" />
+          {note("claude")}
+        </div>
+        <div className="amodel">
+          <Avatar who="codex" size={30} />
+          <b>Codex</b>
+          <ModelPicker
+            value={s.codexModel}
+            options={codexModels.map((m) => ({ value: m.slug, label: m.name }))}
+            onChange={(v) => done("codex", props.saveSettings({ codexModel: v, codexEffort: "" }))}
+          />
+          <EffortPicker value={s.codexEffort} options={codexModel?.efforts ?? ["low", "medium", "high", "xhigh"]} onChange={(v) => done("codex", props.saveSettings({ codexEffort: v }))} title="Codex 推理强度" />
+          {note("codex")}
+        </div>
+        {others.map((a) => {
+          const l = lists[a.id];
+          const isApi = a.type === "openai";
+          const isDs = a.builtin === "deepseek";
+          const args = a.cli?.args ?? "";
+          const modelOk = isApi || isDs || args.includes("{model}");
+          const effortOk = isApi || isDs || args.includes("{effort}");
+          const model = isApi ? (a.openai?.model ?? "") : (a.defaultModel ?? "");
+          const effort = a.defaultEffort ?? "";
+          const opts = [...new Set([...(l?.models ?? []), ...(isApi && model ? [model] : [])])].map((m) => ({ value: m }));
+          const gemini = /gemini/i.test(`${a.id} ${a.name} ${args}`);
+          return (
+            <div key={a.id} className={"amodel" + (a.enabled ? "" : " off")}>
+              <Avatar who={a.id} size={30} />
+              <b>{a.name}</b>
+              <ModelPicker
+                value={model}
+                options={opts}
+                allowDefault={!isApi}
+                disabled={!modelOk}
+                title={modelOk ? undefined : "这个智能体的参数模板里没有 {model}，无法切换模型（在「编辑」里把模型名换成 {model}）"}
+                onChange={(v) => done(a.id, mao.setAgentDefaults(a.id, v, null))}
+              />
+              <EffortPicker
+                value={effort}
+                options={isDs ? DSH_EFFORTS : isApi ? API_EFFORTS : ["low", "medium", "high"]}
+                disabled={!effortOk}
+                title={effortOk ? (isApi ? "作为 reasoning_effort 发给接口（接口不支持时可能报错）" : "思考等级") : "这个智能体不支持设置思考等级（参数模板里没有 {effort}）"}
+                onChange={(v) => done(a.id, mao.setAgentDefaults(a.id, null, v))}
+              />
+              {note(a.id) ??
+                (gemini ? (
+                  <span className="muted small">Pro 没有免费额度，默认用 Flash</span>
+                ) : l?.error ? (
+                  <span className="muted small" title={l.error}>
+                    读取模型列表失败，可自定义
+                  </span>
+                ) : null)}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ settings page
 export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; quota: Quota; onClose: () => void }) {
   const [s, setS] = useState<Settings | null>(null);
@@ -427,7 +587,11 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
     setS(await mao.saveSettings(s));
     setSaved(true);
   };
-  const model = models.find((m) => m.slug === s?.codexModel);
+  // Saved right away (the model pickers); keeps unsaved edits of the other fields.
+  const saveNow = async (p: Partial<Settings>) => {
+    const next = await mao.saveSettings(p);
+    setS((x) => (x ? { ...x, ...p } : next));
+  };
 
   return (
     <div className="settings">
@@ -503,53 +667,12 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
           {err && <div className="modal-err">⚠ {err}</div>}
         </section>
 
+        {s && <AgentModelsSection s={s} saveSettings={saveNow} agents={agents} codexModels={models} />}
+
         <section>
           <h3>默认设置</h3>
           {s && (
             <div className="form-grid">
-              <label className="field">
-                <span>Claude 模型（留空 = Claude Code 的默认）</span>
-                <input list="claude-models" value={s.claudeModel} onChange={(e) => upd({ claudeModel: e.target.value })} placeholder="默认" />
-                <datalist id="claude-models">
-                  <option value="opus" />
-                  <option value="sonnet" />
-                  <option value="fable" />
-                  <option value="haiku" />
-                </datalist>
-              </label>
-              <label className="field">
-                <span>Claude 思考等级</span>
-                <select value={s.claudeEffort} onChange={(e) => upd({ claudeEffort: e.target.value })}>
-                  <option value="">默认</option>
-                  {CLAUDE_EFFORTS.map((x) => (
-                    <option key={x} value={x}>
-                      {EFFORT_TEXT[x] ?? x}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Codex 模型（新对话的默认值）</span>
-                <select value={s.codexModel} onChange={(e) => upd({ codexModel: e.target.value, codexEffort: "" })}>
-                  <option value="">默认（Codex 设置）</option>
-                  {models.map((m) => (
-                    <option key={m.slug} value={m.slug}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Codex 推理强度</span>
-                <select value={s.codexEffort} onChange={(e) => upd({ codexEffort: e.target.value })}>
-                  <option value="">默认</option>
-                  {(model?.efforts ?? ["low", "medium", "high", "xhigh"]).map((x) => (
-                    <option key={x} value={x}>
-                      {EFFORT_TEXT[x] ?? x}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <label className="field">
                 <span>单次委派超时（秒）</span>
                 <input type="number" min={60} max={3600} value={s.delegateTimeoutSec} onChange={(e) => upd({ delegateTimeoutSec: Number(e.target.value) })} />

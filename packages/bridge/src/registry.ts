@@ -31,6 +31,32 @@ export interface AgentDef {
     loginCmd?: string;
   };
   openai?: { baseUrl: string; model: string; hasKey?: boolean };
+  /** Default model when Claude does not pass one (DeepSeek, CLI agents via {model}). API agents use openai.model. */
+  defaultModel?: string;
+  /** Default reasoning / thinking level (DeepSeek, CLI agents via {effort}, API agents as reasoning_effort). */
+  defaultEffort?: string;
+}
+
+/**
+ * Fill {task} {cwd} {model} {effort} in an args template. A {model}/{effort} token that ends up empty is
+ * dropped together with the flag right before it ("-m {model}" with no model → nothing).
+ */
+export function fillArgs(template: string, vars: { cwd: string; task: string; model: string; effort: string }): string[] {
+  const toks = splitArgs(template ?? "");
+  const out: string[] = [];
+  for (const tok of toks) {
+    if ((tok === "{model}" && !vars.model) || (tok === "{effort}" && !vars.effort)) {
+      if (out.length && out[out.length - 1].startsWith("-")) out.pop();
+      continue;
+    }
+    const v = tok
+      .replace(/\{cwd\}/g, vars.cwd)
+      .replace(/\{model\}/g, vars.model)
+      .replace(/\{effort\}/g, vars.effort)
+      .replace(/\{task\}/g, vars.task);
+    if (v !== "") out.push(v);
+  }
+  return out;
 }
 
 export function readAgents(): AgentDef[] {
@@ -138,8 +164,8 @@ export async function runCliAgent(def: AgentDef, task: string, cwd: string, time
   if (!c.exe) throw new Error(`智能体 ${def.name} 没有设置可执行文件`);
   const isScript = /\.(cmd|bat)$/i.test(c.exe);
   if (isScript && c.input === "arg") throw new Error(`${def.name}: .cmd/.bat 程序只支持通过 stdin 传任务（避免命令行注入）`);
-  const fill = (tok: string) => tok.replace(/\{cwd\}/g, cwd).replace(/\{model\}/g, model ?? "").replace(/\{task\}/g, c.input === "arg" ? task : "");
-  const args = splitArgs(c.args ?? "").map(fill).filter((a) => a !== "");
+  const useModel = model || def.defaultModel || "";
+  const args = fillArgs(c.args ?? "", { cwd, task: c.input === "arg" ? task : "", model: useModel, effort: def.defaultEffort || "" });
   if (c.input === "arg" && !(c.args ?? "").includes("{task}")) args.push(task);
   const quote = (a: string) => (/[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
   const { env, secrets } = freshUserEnv();
@@ -154,7 +180,7 @@ export async function runCliAgent(def: AgentDef, task: string, cwd: string, time
     task: c.input === "stdin" ? task : "",
     timeoutSec,
     parser: new GenericParser(c.output, c.answerField),
-  });
+  }).then((r) => ({ ...r, model: (c.args ?? "").includes("{model}") ? useModel || "默认" : undefined }));
 }
 
 /** Health / login check of a CLI agent: exit code 0 = ok. No command configured = ok. */
@@ -199,6 +225,7 @@ export async function runOpenAiAgent(def: AgentDef, task: string, cwd: string, t
       finalAnswer: String(j.text ?? ""),
       durationSec: Math.round((Date.now() - started) / 100) / 10,
       usage: j.usage,
+      model: String(j.model ?? model ?? def.openai?.model ?? ""),
       errors: j.error ? [String(j.error)] : [],
       logFile: String(j.logFile ?? ""),
     };

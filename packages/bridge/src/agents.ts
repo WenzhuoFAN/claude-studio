@@ -1,8 +1,10 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { deepseekKey, locateCodex, locateDsh } from "./locate.js";
 import { codexLoggedIn, ensureCodexLogin, looksLikeAuthError } from "./auth.js";
-import { runAgent, type AgentResult, type Parser, type Usage } from "./runner.js";
+import { LOG_DIR, runAgent, type AgentResult, type Parser, type Usage } from "./runner.js";
+import { readAgents } from "./registry.js";
 import { classifyCommand, formatCommands, type CmdRecord } from "./cmdpolicy.js";
 
 export const DEFAULT_TIMEOUT_SEC = Number(process.env.MAO_DEFAULT_TIMEOUT_SEC ?? 900);
@@ -153,7 +155,7 @@ async function delegateToCodexOnce(a: {
     timeoutSec: a.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
     parser: new CodexParser(),
     meta: { mode: a.mode, allowNetwork: !!a.allowNetwork, model: model ?? null, reasoningEffort: effort ?? null },
-  });
+  }).then((r) => ({ ...r, model: (model || "默认") + (effort ? ` · ${effort}` : "") }));
 }
 
 // ---------------------------------------------------------------- DeepSeek (dsh)
@@ -250,9 +252,63 @@ class DshParser implements Parser {
   completed() { return this.reason === "completed"; }
 }
 
-export async function delegateToDeepseek(a: { task: string; cwd: string; timeoutSec?: number }): Promise<AgentResult> {
+/** DeepSeek's default model / thinking level from the registry (设置 → 各智能体默认模型). */
+function deepseekDefaults(): { model?: string; effort?: string } {
+  const d = readAgents().find((x) => x.builtin === "deepseek");
+  return { model: d?.defaultModel?.trim() || undefined, effort: d?.defaultEffort?.trim() || undefined };
+}
+
+let dshRouteCache: { provider: string; model: string } | undefined;
+/** The provider / model dsh is configured with (only those two values are read from its composed config). */
+function dshRoute(dsh: string): { provider: string; model: string } {
+  if (dshRouteCache) return dshRouteCache;
+  let provider = "deepseek-official";
+  let dmodel = "deepseek-flash";
+  try {
+    const isCmd = /\.(cmd|bat)$/i.test(dsh);
+    const out = execFileSync(isCmd ? (process.env.ComSpec ?? "cmd.exe") : dsh, isCmd ? ["/d", "/s", "/c", `""${dsh}" --profile headless --dump-config"`] : ["--profile", "headless", "--dump-config"], {
+      encoding: "utf8",
+      windowsHide: true,
+      windowsVerbatimArguments: isCmd,
+      timeout: 30000,
+      stdio: ["ignore", "pipe", "ignore"],
+    } as Parameters<typeof execFileSync>[2] & { encoding: "utf8" }) as string;
+    const block = out.split(/\r?\n(?=- id:)/).find((b) => /^- id: agent-default-model\b/.test(b.trim()));
+    const m = block?.match(/^\s*provider:\s*['"]?([\w.-]+)/m);
+    const mm = block?.match(/^\s*model:\s*['"]?([\w.:-]+)/m);
+    if (m?.[1]) provider = m[1];
+    if (mm?.[1]) dmodel = mm[1];
+  } catch {
+    /* defaults */
+  }
+  return (dshRouteCache = { provider, model: dmodel });
+}
+
+/** A --patch overlay that sets dsh's model / reasoning effort for this one run. */
+function dshModelPatch(dsh: string, model: string | undefined, effort: string | undefined): string | null {
+  if (!model && !effort) return null;
+  if (model && !/^[\w.\-:]+$/.test(model)) throw new Error(`invalid DeepSeek model name: ${model}`);
+  if (effort && !/^[a-z]+$/.test(effort)) throw new Error(`invalid reasoning effort: ${effort}`);
+  const route = dshRoute(dsh);
+  const provider = route.provider;
+  // dsh requires provider + model together; without a chosen model keep the profile's default one.
+  const useModel = model || route.model;
+  const lines = ["- id: agent-default-model", "  config:", `    provider: ${provider}`, `    model: ${useModel}`];
+  if (effort) lines.push(`    reasoningEffort: ${effort === "off" ? "null" : effort}`);
+  const dir = path.join(LOG_DIR, "dsh-patches");
+  mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, `model-${useModel}-${effort ?? "default"}.yml`);
+  writeFileSync(f, lines.join("\n") + "\n");
+  return f;
+}
+
+export async function delegateToDeepseek(a: { task: string; cwd: string; timeoutSec?: number; model?: string }): Promise<AgentResult> {
   const cwd = checkCwd(a.cwd);
   const dsh = locateDsh();
+  const def = deepseekDefaults();
+  const model = a.model || def.model;
+  const effort = def.effort;
+  const patchFile = dshModelPatch(dsh, model, effort);
   const key = deepseekKey();
   const env = { ...process.env };
   if (key) env.DEEPSEEK_API_KEY = key;
@@ -262,6 +318,8 @@ export async function delegateToDeepseek(a: { task: string; cwd: string; timeout
   // Let it read the conversation's attachments (the path is quoted for cmd: the app data folder has spaces).
   const att = attachDir();
   if (att) dshArgs.push("--add-dir", /\.(cmd|bat)$/i.test(dsh) ? `"${att}"` : att);
+  // The model override is a launcher flag: it goes before the profile's own args.
+  if (patchFile) dshArgs.splice(2, 0, "--patch", /\.(cmd|bat)$/i.test(dsh) ? `"${patchFile}"` : patchFile);
   dshArgs.push("-");
   const isCmd = /\.(cmd|bat)$/i.test(dsh);
   return runAgent({
@@ -276,7 +334,7 @@ export async function delegateToDeepseek(a: { task: string; cwd: string; timeout
     timeoutSec: a.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
     parser: new DshParser(cwd, att ? [att] : [], process.env.MAO_DSH_COMMANDS !== "0"),
     secrets: key ? [key] : [],
-  });
+  }).then((r) => ({ ...r, model: (model || "默认") + (effort ? ` · ${effort}` : "") }));
 }
 
 /** Human/LLM-friendly text block for the MCP tool result. */
@@ -290,6 +348,7 @@ export function formatResult(r: AgentResult): string {
   const lines = [
     `agent: ${r.agent}   status: ${r.status}   duration: ${r.durationSec}s   exit: ${r.exitCode}`,
     r.usage ? `tokens: ${JSON.stringify(r.usage)}` : "tokens: (not reported)",
+    r.model ? `model: ${r.model}` : "",
     `files changed (${files.length}):`,
     ...(files.length ? files : ["  (none)"]),
     r.errors.length ? `errors:\n  ${r.errors.join("\n  ")}` : "",

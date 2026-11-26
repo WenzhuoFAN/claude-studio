@@ -34,6 +34,8 @@ export interface AgentResult {
   logFile: string;
   /** Commands the agent ran, with the supervisor's verdict (DeepSeek). */
   commands?: CmdRecord[];
+  /** Model used ("默认" = the agent's own default). */
+  model?: string;
 }
 
 export interface Parser {

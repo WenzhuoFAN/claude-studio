@@ -134,6 +134,28 @@ function locateGemini(): { node: string; script: string } | null {
   return null;
 }
 
+/** Model choices for 设置 → 各智能体默认模型. API agents are asked (GET /models, with the stored key). */
+async function agentModels(id: string): Promise<{ models: string[]; error?: string }> {
+  const a = agents.get(id);
+  if (!a) return { models: [] };
+  if (a.builtin === "deepseek") return { models: ["deepseek-flash", "deepseek-v4-pro"] };
+  if (a.type === "cli" && /gemini/i.test(`${a.id} ${a.name} ${a.cli?.args ?? ""}`))
+    return { models: ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3-pro-preview"] };
+  if (a.type === "openai" && a.openai?.baseUrl) {
+    try {
+      const key = agents.secret(a.id);
+      const res = await fetch(`${a.openai.baseUrl.replace(/\/+$/, "")}/models`, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) return { models: [], error: `HTTP ${res.status}` };
+      const j: any = await res.json();
+      const list = (Array.isArray(j?.data) ? j.data : Array.isArray(j?.models) ? j.models : []).map((m: any) => String(m?.id ?? m?.name ?? m)).filter(Boolean);
+      return { models: [...new Set<string>(list)].slice(0, 200) };
+    } catch (e: any) {
+      return { models: [], error: String(e?.message ?? e).slice(0, 200) };
+    }
+  }
+  return { models: [] };
+}
+
 /** Ready-made agent definitions for 设置 →「从模板添加」. The avatar is a bundled image (renderer side). */
 function agentPresets(): { key: string; label: string; note: string; def: AgentDef | null }[] {
   const g = locateGemini();
@@ -152,9 +174,11 @@ function agentPresets(): { key: string; label: string; note: string; def: AgentD
             canEdit: true,
             canRun: false,
             enabled: true,
+            // Pro has no free quota on the Gemini API: default to Flash.
+            defaultModel: "gemini-3-flash-preview",
             cli: {
               exe: g.node,
-              args: `"${g.script}" -m gemini-3-flash-preview -p " " -o stream-json --approval-mode auto_edit --skip-trust`,
+              args: `"${g.script}" -m {model} -p " " -o stream-json --approval-mode auto_edit --skip-trust`,
               input: "stdin",
               output: "jsonl",
               answerField: "content",
@@ -289,6 +313,8 @@ function registerIpc() {
   ipcMain.handle("installUpdate", () => updater.install());
   ipcMain.handle("saveAgent", (_e, def: AgentDef, apiKey?: string | null) => agents.upsert(def, apiKey));
   ipcMain.handle("removeAgent", (_e, id: string) => agents.remove(id));
+  ipcMain.handle("setAgentDefaults", (_e, id: string, model?: string | null, effort?: string | null) => agents.setDefaults(id, model == null ? null : String(model), effort == null ? null : String(effort)));
+  ipcMain.handle("agentModels", (_e, id: string) => agentModels(id));
   ipcMain.handle("setAgentAvatar", (_e, id: string, png: string) => agents.setAvatar(id, png));
   ipcMain.handle("testAgent", (_e, def: AgentDef, apiKey?: string | null) => testAgent(def, apiKey));
   ipcMain.handle("pickImage", async () => {

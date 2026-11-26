@@ -42,6 +42,7 @@ export async function callOpenAi(def: AgentDef, key: string | null, task: string
         ],
         stream: true,
         stream_options: { include_usage: true },
+        ...(def.defaultEffort ? { reasoning_effort: def.defaultEffort } : {}),
       }),
       signal: AbortSignal.timeout(timeoutSec * 1000),
     });
@@ -158,7 +159,7 @@ export function startAppServer(agents: AgentStore): Promise<{ url: string; token
         /* ignore */
       }
     }
-    res.end(JSON.stringify({ ...r, logFile }));
+    res.end(JSON.stringify({ ...r, logFile, model: p.model || def.openai.model }));
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${(server.address() as any).port}`, token })));
 }
