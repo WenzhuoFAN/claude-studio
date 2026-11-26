@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
 
 最近一次读到的值缓存在 `%APPDATA%\Claude 的工作室\data\quota.json`。
 
-新任务的选项（在输入框上方，会记住上次的选择）：
+模型和选项（在输入框下方，新对话会记住上次的选择）：
 
 | 选项 | 作用 |
 |---|---|
@@ -89,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-desktop.ps1
 | Codex 模型 | 列表来自 `codex debug models`；「默认」= 用 Codex 自己的设置 |
 | 推理强度 | Codex 的 reasoning effort；可选项随模型变化 |
 
-这些选项按对话保存（续聊时沿用），显示在右侧总览卡片上。
+这些选项按对话保存，显示在右侧总览卡片上；对话进行中也可以在输入框下方切换，从下一条消息开始生效。
 
 ### 附件（图片和文件）
 
@@ -250,7 +250,7 @@ claude-studio/
 
 ## 设置与添加智能体
 
-左上角「＋ 新项目」旁边的 ⚙ 打开设置页：
+左下角的「⚙ 设置」打开设置页：
 
 ![设置页](docs/screenshots/settings.png)
 

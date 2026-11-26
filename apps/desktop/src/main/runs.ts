@@ -300,6 +300,13 @@ export class RunManager extends EventEmitter {
     this.spawnClaude(id, text, false, adopt(id, attachments));
   }
 
+  /** Options for the next turns of a conversation (model / effort switched mid-conversation). */
+  setOptions(id: string, options: RunOptions) {
+    const m = this.meta(id);
+    if (!m) throw new Error("没有这个对话");
+    this.saveMeta({ ...m, options });
+  }
+
   stop(id: string) {
     const a = this.active.get(id);
     if (!a) return;

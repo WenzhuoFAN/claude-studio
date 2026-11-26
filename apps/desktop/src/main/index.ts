@@ -336,19 +336,9 @@ function registerIpc() {
     const st = envStatus();
     if (!st.claude) throw new Error("找不到 Claude Code（claude.exe），无法开始。");
     if (!st.bridgeBuilt) throw new Error("bridge 还没编译，请先点上方提示里的「编译 bridge」。");
-    const s = loadSettings();
-    const opts: RunOptions = {
-      splitSmall: !!options?.splitSmall,
-      codexModel: options?.codexModel ?? "",
-      codexEffort: options?.codexEffort ?? "",
-      // Per conversation; undefined (older renderer) falls back to 设置.
-      claudeModel: String(options?.claudeModel ?? s.claudeModel ?? "").trim(),
-      claudeEffort: String(options?.claudeEffort ?? s.claudeEffort ?? ""),
-    };
-    if (opts.claudeModel && !/^[\w.\-:\[\]]+$/.test(opts.claudeModel)) throw new Error(`Claude 模型名称无效：${opts.claudeModel}`);
-    if (opts.claudeEffort && !/^[a-z]+$/.test(opts.claudeEffort)) throw new Error(`Claude 思考等级无效：${opts.claudeEffort}`);
-    return runs.start(task.trim(), workdir, project.id, opts, Array.isArray(attachments) ? attachments : []);
+    return runs.start(task.trim(), workdir, project.id, cleanOptions(options), Array.isArray(attachments) ? attachments : []);
   });
+  ipcMain.handle("setRunOptions", (_e, id: string, o: Partial<RunOptions>) => runs.setOptions(id, cleanOptions(o)));
   ipcMain.handle("stageFiles", (_e, paths: string[]) => stageFiles(Array.isArray(paths) ? paths.map(String) : []));
   ipcMain.handle("stageBlob", (_e, name: string, mime: string, data: Uint8Array) => stageBlob(String(name ?? ""), String(mime ?? ""), data));
   ipcMain.handle("pickAttachments", async () => {
@@ -378,6 +368,23 @@ function registerIpc() {
   ipcMain.handle("openPath", (_e, p: string) => {
     if (existsSync(p)) shell.openPath(p);
   });
+}
+
+/** Validate run options from the renderer; missing Claude choices (older renderer) fall back to 设置. */
+function cleanOptions(options?: Partial<RunOptions>): RunOptions {
+  const s = loadSettings();
+  const opts: RunOptions = {
+    splitSmall: !!options?.splitSmall,
+    codexModel: String(options?.codexModel ?? ""),
+    codexEffort: String(options?.codexEffort ?? ""),
+    claudeModel: String(options?.claudeModel ?? s.claudeModel ?? "").trim(),
+    claudeEffort: String(options?.claudeEffort ?? s.claudeEffort ?? ""),
+  };
+  if (opts.claudeModel && !/^[\w.\-:\[\]]+$/.test(opts.claudeModel)) throw new Error(`Claude 模型名称无效：${opts.claudeModel}`);
+  if (opts.claudeEffort && !/^[a-z]+$/.test(opts.claudeEffort)) throw new Error(`Claude 思考等级无效：${opts.claudeEffort}`);
+  if (opts.codexModel && !/^[\w.\-:]+$/.test(opts.codexModel)) throw new Error(`Codex 模型名称无效：${opts.codexModel}`);
+  if (opts.codexEffort && !/^[a-z]+$/.test(opts.codexEffort)) throw new Error(`Codex 推理强度无效：${opts.codexEffort}`);
+  return opts;
 }
 
 // ---------------------------------------------------------------- DeepSeek sandbox access

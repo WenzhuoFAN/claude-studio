@@ -393,9 +393,6 @@ function Sidebar(props: {
         <button className="btn primary block" onClick={props.onNewProject}>
           ＋ 新项目
         </button>
-        <button className="btn gear" title="设置（智能体、默认模型、数据目录…）" onClick={props.onSettings}>
-          ⚙
-        </button>
       </div>
 
       <div className="section-label">项目</div>
@@ -463,6 +460,9 @@ function Sidebar(props: {
           );
         })}
       </div>
+      <button className="side-settings" title="设置（智能体、默认模型、数据目录…）" onClick={props.onSettings}>
+        <span className="gear-ico">⚙</span> 设置
+      </button>
     </aside>
   );
 }
@@ -1310,11 +1310,11 @@ function loadOpts(): RunOptions {
   }
 }
 
-function OptionsRow({ opts, setOpts, models }: { opts: RunOptions; setOpts: (o: RunOptions) => void; models: CodexModel[] }) {
+function OptionsRow({ opts, setOpts, models, midway }: { opts: RunOptions; setOpts: (o: RunOptions) => void; models: CodexModel[]; midway?: boolean }) {
   const model = models.find((m) => m.slug === opts.codexModel);
   const efforts = model?.efforts ?? ["low", "medium", "high", "xhigh"];
   return (
-    <div className="options">
+    <div className="options" title={midway ? "改了从下一条消息开始生效" : undefined}>
       <label className="sel" title="主管 Claude 用的模型；默认值在 设置 → 默认选项">
         Claude 模型
         <select value={opts.claudeModel ?? ""} onChange={(e) => setOpts({ ...opts, claudeModel: e.target.value })}>
@@ -1353,7 +1353,7 @@ function OptionsRow({ opts, setOpts, models }: { opts: RunOptions; setOpts: (o: 
         </select>
       </label>
       <label className="sel">
-        推理强度
+        Codex 推理
         <select value={opts.codexEffort} onChange={(e) => setOpts({ ...opts, codexEffort: e.target.value })}>
           <option value="">默认{model?.defaultEffort ? `（${EFFORT_TEXT[model.defaultEffort] ?? model.defaultEffort}）` : ""}</option>
           {efforts.map((e) => (
@@ -1513,6 +1513,12 @@ function AppInner() {
     addStaged(res);
   };
   const canAttach = !!project && !running;
+  // Options shown under the input: the draft choice for a new conversation, the conversation's own otherwise.
+  const shownOpts: RunOptions = isNew || !meta ? opts : { ...DEFAULT_OPTS, ...meta.options };
+  const changeOpts = (o: RunOptions) => {
+    if (isNew || !meta) return setOpts(o);
+    mao.setRunOptions(meta.id, o).catch((e) => setError(cleanError(e)));
+  };
   // The latest DeepSeek result of this conversation says its sandbox could not be prepared in the project folder.
   const lastDs = [...events].reverse().find((e) => e.k === "delegate_result" && e.who === "deepseek");
   const needGrant = !!lastDs && lastDs.k === "delegate_result" && /SANDBOX_ACL/.test(lastDs.error ?? "");
@@ -1639,7 +1645,6 @@ function AppInner() {
               <SandboxGrant projectId={project.id} />
             </div>
           )}
-          {isNew && project && <OptionsRow opts={opts} setOpts={setOpts} models={models} />}
           {att.length > 0 && <Attachments list={att} onRemove={(a) => setAtt((l) => l.filter((x) => x.path !== a.path))} />}
           <textarea
             value={draft}
@@ -1663,7 +1668,8 @@ function AppInner() {
             <button className="btn attach" disabled={!canAttach} title="添加图片或文件（也可以直接 Ctrl+V 粘贴或拖进来；图片 ≤20 MB，文件 ≤50 MB）" onClick={() => mao.pickAttachments().then(addStaged)}>
               📎
             </button>
-            <span className="hint">Ctrl+Enter 发送 · 可粘贴/拖入图片和文件</span>
+            {project && <OptionsRow opts={shownOpts} setOpts={changeOpts} models={models} midway={!isNew} />}
+            <span className="hint" title="Ctrl+Enter 发送；可以 Ctrl+V 粘贴或拖入图片和文件">Ctrl+Enter 发送</span>
             {running ? (
               <button className="btn danger" onClick={() => meta && mao.stopRun(meta.id)}>
                 ■ 停止

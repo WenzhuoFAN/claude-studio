@@ -231,6 +231,8 @@ export interface MaoApi {
   onBoardChanged(cb: (projectId: string, board: Board) => void): () => void;
   startRun(task: string, projectId: string, options: RunOptions, attachments?: Attachment[]): Promise<RunMeta>;
   sendMessage(runId: string, text: string, attachments?: Attachment[]): Promise<void>;
+  /** Change a conversation's model / effort options; used from its next message on. */
+  setRunOptions(runId: string, options: RunOptions): Promise<void>;
   /** Copy files (by path) into the attachments staging folder. */
   stageFiles(paths: string[]): Promise<StageResult>;
   /** Save a pasted image / file that has no path (e.g. a screenshot) into staging. */
