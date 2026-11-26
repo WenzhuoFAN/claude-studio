@@ -1195,11 +1195,19 @@ function Panel(props: { meta: RunMeta | null; project: Project | null; events: R
         </div>
         {m && (
           <div className="viewtoggle">
-            <button className={view === "cards" ? "on" : ""} onClick={() => setV("cards")}>
-              卡片
+            <button className={view === "cards" ? "on" : ""} onClick={() => setV("cards")} title="卡片" aria-label="卡片">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+                <rect x="2" y="2" width="12" height="5" rx="1.5" />
+                <rect x="2" y="9" width="12" height="5" rx="1.5" />
+              </svg>
             </button>
-            <button className={view === "tree" ? "on" : ""} onClick={() => setV("tree")}>
-              树状图
+            <button className={view === "tree" ? "on" : ""} onClick={() => setV("tree")} title="树状图" aria-label="树状图">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="1.5" y="1.5" width="5" height="4" rx="1" />
+                <rect x="9.5" y="6" width="5" height="4" rx="1" />
+                <rect x="9.5" y="11" width="5" height="3.5" rx="1" />
+                <path d="M4 5.5v7.25h5.5M4 8h5.5" />
+              </svg>
             </button>
           </div>
         )}

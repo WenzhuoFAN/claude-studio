@@ -272,8 +272,9 @@ pre, code { font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px
 .ph-title { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .crumbs { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .viewtoggle { display: flex; background: var(--bg); border: 1px solid var(--line2); border-radius: 7px; overflow: hidden; flex: none; }
-.viewtoggle button { background: none; border: 0; color: var(--muted); font-size: 12px; padding: 3px 10px; }
-.viewtoggle button.on { background: var(--bg3); color: var(--text); }
+.viewtoggle button { background: none; border: 0; color: var(--muted); padding: 4px 9px; display: flex; align-items: center; cursor: pointer; }
+.viewtoggle button:hover { color: var(--text); }
+.viewtoggle button.on { background: var(--bg3); color: var(--claude); }
 .quota-row { font-size: 12px; }
 .quota { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: baseline; color: var(--muted); }
 .quota b { color: var(--text); font-variant-numeric: tabular-nums; }
