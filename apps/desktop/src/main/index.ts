@@ -8,7 +8,8 @@ import { deepseekKey, freshUserEnv, locateCodex, locateDsh } from "../../../../p
 import type { Attachment, CodexModel, EnvStatus, RunOptions } from "../shared/types";
 import { cleanStaging, preview, stageBlob, stageFiles } from "./attachments";
 
-if (process.platform === "win32") app.setAppUserModelId("claude-studio");
+// Same id as the installer's shortcuts (build.appId): needed for Windows notifications and taskbar grouping.
+if (process.platform === "win32") app.setAppUserModelId("io.github.claude-studio");
 import { APP_NAME, BRIDGE, DATA, DEFAULT_WORKDIR, PACKAGED, ROOT, RUNS, USER_DIR, boardPath, locateClaude, migrateRepoData } from "./paths";
 import { RunManager } from "./runs";
 import { ProjectStore } from "./projects";
@@ -18,6 +19,10 @@ import { AGENTS_FILE, AgentStore } from "./agents";
 import { callOpenAi, startAppServer } from "./appserver";
 import { loadSettings, saveSettings } from "./settings";
 import { Updater } from "./updater";
+import { markQuitting, trayTest, notifyAway, onWindowClose, refreshTray, requestQuit, setupTray, showWindow } from "./tray";
+// One instance per data folder: opening the shortcut again shows the window that is already running (maybe in the tray).
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on("second-instance", () => showWindow());
 
 let updater: Updater;
 import { spawn } from "node:child_process";
@@ -280,6 +285,15 @@ function createWindow() {
   const title = `${APP_NAME} v${app.getVersion()}${PACKAGED ? "" : " 开发版"}`;
   win.setTitle(title);
   win.on("page-title-updated", (e) => e.preventDefault());
+  // X hides to the tray (设置 → 关闭窗口时最小化到托盘); Ctrl+Q quits for real.
+  win.on("close", (e) => onWindowClose(e));
+  win.on("session-end", markQuitting); // Windows is logging off / shutting down
+  win.webContents.on("before-input-event", (e, i) => {
+    if (i.type === "keyDown" && i.control && !i.alt && !i.shift && i.key.toLowerCase() === "q") {
+      e.preventDefault();
+      requestQuit(false);
+    }
+  });
   // Never open external pages inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url);
@@ -311,7 +325,7 @@ function registerIpc() {
   ipcMain.handle("agentPresets", () => agentPresets());
   ipcMain.handle("getUpdate", () => updater.status);
   ipcMain.handle("checkUpdate", () => updater.check());
-  ipcMain.handle("installUpdate", () => updater.install());
+  ipcMain.handle("installUpdate", () => requestQuit(true));
   ipcMain.handle("saveAgent", (_e, def: AgentDef, apiKey?: string | null) => agents.upsert(def, apiKey));
   ipcMain.handle("removeAgent", (_e, id: string) => agents.remove(id));
   ipcMain.handle("setAgentDefaults", (_e, id: string, model?: string | null, effort?: string | null) => agents.setDefaults(id, model == null ? null : String(model), effort == null ? null : String(effort)));
@@ -467,7 +481,8 @@ async function grantFullControl(folder: string): Promise<{ ok: boolean; output: 
  */
 /**
  * MAO_UI_SCRIPT=<js file>: run a script in the page that drives the real UI (clicks, typing) for demos/tests.
- * The script can print "__SHOT__:<png path>" to take a screenshot, "__SIZE__:w,h" to resize the window and "__QUIT__" to close the app.
+ * The script can print "__SHOT__:<png path>" to take a screenshot, "__SIZE__:w,h" to resize the window, "__CLOSE__" (the X button),
+ * "__TRAY__:click|menu:<label>|state" (tray, result logged as [tray]) and "__QUIT__" to close the app.
  */
 function uiScript() {
   const f = process.env.MAO_UI_SCRIPT;
@@ -477,6 +492,11 @@ function uiScript() {
     else if (message.startsWith("__SIZE__:")) {
       const [w, h] = message.slice(9).split(",").map(Number);
       win?.setSize(w, h);
+    } else if (message === "__CLOSE__") win?.close(); // same path as the X button
+    else if (message.startsWith("__TRAY__:")) console.log("[tray]", trayTest(message.slice(9)));
+    else if (message === "__FAKE_UPDATE__") {
+      updater.status = { ...updater.status, state: "ready", version: "9.9.9" };
+      updater.emit("changed", updater.status);
     } else if (message === "__QUIT__") setTimeout(() => app.quit(), 3000);
   });
   win.webContents.executeJavaScript(readFileSync(f, "utf8")).catch(() => {});
@@ -659,9 +679,48 @@ app.whenReady().then(async () => {
   });
   registerIpc();
   createWindow();
+  setupTray({ win: () => win, runs: () => runs.list(), update: () => updater.status, installUpdate: () => updater.install() });
+  watchForNotifications();
   updater.start();
   win!.webContents.once("did-finish-load", () => setTimeout(autorun, 800));
 });
+
+/** Tray icon / menu follow the runs and updates; Windows notifications when the user is away. */
+function watchForNotifications() {
+  const last = new Map<string, string>(runs.list().map((r) => [r.id, r.status]));
+  runs.on("runs", (list: { id: string; title: string; status: string }[]) => {
+    for (const r of list) {
+      const was = last.get(r.id);
+      last.set(r.id, r.status);
+      if (was !== "running" || r.status === "running") continue;
+      if (r.status === "done") notifyAway("任务完成", `「${r.title}」已完成，点这里查看结果。`, r.id);
+      else if (r.status === "failed") notifyAway("任务失败", `「${r.title}」没能完成，点这里查看原因。`, r.id);
+    }
+    refreshTray();
+  });
+  // DeepSeek needs the sandbox grant (a button in the conversation).
+  runs.on("event", (id: string, ev: { k: string; who?: string; error?: string }) => {
+    if (ev.k === "delegate_result" && ev.who === "deepseek" && /SANDBOX_ACL/.test(ev.error ?? "")) {
+      const t = runs.list().find((r) => r.id === id)?.title ?? "";
+      notifyAway("DeepSeek 需要授权", `「${t}」：需要点「授予 DeepSeek 沙箱权限」才能在项目文件夹里跑命令。`, id);
+    }
+  });
+  // An agent needs the user to log in.
+  const authWas: Record<string, string> = {};
+  auth.on("changed", (a: Record<string, { state: string }>) => {
+    for (const [id, s] of Object.entries(a)) {
+      if (s.state === "needed" && authWas[id] !== "needed") {
+        const name = id === "claude" ? "Claude" : id === "codex" ? "Codex" : (agents.get(id)?.name ?? id);
+        notifyAway(`${name} 需要登录`, "有任务在等它登录，点这里打开窗口完成登录。");
+      }
+      authWas[id] = s.state;
+    }
+  });
+  updater.on("changed", (s: { state: string; version?: string }) => {
+    refreshTray();
+    if (s.state === "ready") notifyAway("新版本已下载", `v${s.version} 已准备好：右键托盘图标选「重启并更新」，或下次退出时自动安装。`);
+  });
+}
 
 app.on("before-quit", () => {
   runs?.stopAll();

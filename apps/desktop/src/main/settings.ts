@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dshCommands: true,
   delegateTimeoutSec: 900,
   loginWaitSec: 600,
+  minimizeToTray: true,
 };
 
 export function loadSettings(): Settings {

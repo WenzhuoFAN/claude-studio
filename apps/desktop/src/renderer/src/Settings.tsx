@@ -694,6 +694,16 @@ export function SettingsPage({ agents, quota, onClose }: { agents: AgentDef[]; q
           </div>
         </section>
 
+        {s && (
+          <section>
+            <h3>窗口</h3>
+            <label className="check">
+              <input type="checkbox" checked={s.minimizeToTray !== false} onChange={async (e) => setS(await mao.saveSettings({ minimizeToTray: e.target.checked }))} /> 关闭窗口时最小化到托盘
+            </label>
+            <div className="muted small">点窗口右上角的 × 只是隐藏到屏幕右下角的托盘，正在运行的任务继续跑，完成或需要你处理时会弹出 Windows 通知。单击托盘图标打开窗口；真正退出：右键托盘图标 →「退出」，或按 Ctrl+Q。关掉这一项后，× 会直接退出应用。</div>
+          </section>
+        )}
+
         {s && <DshCommandsSection on={s.dshCommands !== false} onChange={async (v) => setS(await mao.saveSettings({ dshCommands: v }))} />}
 
         <section>

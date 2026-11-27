@@ -40,6 +40,7 @@ const api: MaoApi = {
   checkUpdate: () => ipcRenderer.invoke("checkUpdate"),
   installUpdate: () => ipcRenderer.invoke("installUpdate"),
   onUpdate: (cb) => on("update", cb),
+  onTrayNew: (cb) => on("trayNew", cb),
   pickImage: () => ipcRenderer.invoke("pickImage"),
   pickExecutable: () => ipcRenderer.invoke("pickExecutable"),
   getSettings: () => ipcRenderer.invoke("getSettings"),

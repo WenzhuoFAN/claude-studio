@@ -17,6 +17,10 @@ export interface Settings {
   dshCommands: boolean;
   delegateTimeoutSec: number;
   loginWaitSec: number;
+  /** The window's X hides the app to the system tray (default on). */
+  minimizeToTray: boolean;
+  /** The one-time 「已最小化到托盘」 notification was shown. */
+  trayHintShown?: boolean;
 }
 
 export interface AppInfo {
@@ -238,6 +242,8 @@ export interface MaoApi {
   checkUpdate(): Promise<UpdateStatus>;
   installUpdate(): Promise<void>;
   onUpdate(cb: (s: UpdateStatus) => void): () => void;
+  /** Tray menu 「新对话」. */
+  onTrayNew(cb: () => void): () => void;
   saveAgent(def: AgentDef, apiKey?: string | null): Promise<AgentDef>;
   /** Ready-made agents for「从模板添加」; def is null when the tool isn't installed (note says why). */
   agentPresets(): Promise<{ key: string; label: string; note: string; def: AgentDef | null }[]>;

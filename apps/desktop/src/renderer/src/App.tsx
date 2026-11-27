@@ -630,7 +630,7 @@ function UpdateBanner() {
       <button className="btn small primary" onClick={() => mao.installUpdate()}>
         立即重启
       </button>
-      <button className="btn small" onClick={() => setLater(s.version ?? "")}>
+      <button className="btn small" title="先不重启：从托盘图标右键「退出」时会自动安装，托盘菜单里也可以随时「重启并更新」" onClick={() => setLater(s.version ?? "")}>
         稍后
       </button>
     </div>
@@ -1622,6 +1622,7 @@ function AppInner() {
     mao.status().then(setEnv);
   };
   const selRef = useRef<string | null>(null);
+  const trayProject = useRef<string | null>(null);
   const selected = sel?.kind === "run" ? sel.id : null;
   selRef.current = selected;
 
@@ -1675,6 +1676,11 @@ function AppInner() {
         if (id === selRef.current) setEvents((es) => (es.length && es[es.length - 1].seq >= ev.seq ? es : [...es, ev]));
       }),
       mao.onSelectRun((id) => selectRun(id)),
+      // tray menu 「新对话」: in the project on screen, else the first one
+      mao.onTrayNew(() => {
+        const pid = trayProject.current;
+        if (pid) newConversation(pid);
+      }),
     ];
     return () => offs.forEach((f) => f());
   }, []);
@@ -1706,6 +1712,7 @@ function AppInner() {
 
   const meta = runs.find((r) => r.id === selected) ?? null;
   const projectId = meta?.projectId ?? (sel?.kind === "new" ? sel.projectId : null);
+  trayProject.current = projectId ?? projects.find((p) => !p.removed)?.id ?? null;
   const project = projects.find((p) => p.id === projectId) ?? null;
   const board = projectId ? boards[projectId] : undefined;
   const running = meta?.status === "running";
