@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { checkPath, cleanGrants } from "./grants";
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { readBoard } from "../../../../packages/bridge/src/board";
@@ -178,7 +179,7 @@ function agentPresets(): { key: string; label: string; note: string; def: AgentD
             defaultModel: "gemini-3-flash-preview",
             cli: {
               exe: g.node,
-              args: `"${g.script}" -m {model} -p " " -o stream-json --approval-mode auto_edit --skip-trust`,
+              args: `"${g.script}" -m {model} -p " " -o stream-json --approval-mode auto_edit --skip-trust --include-directories {dirs}`,
               input: "stdin",
               output: "jsonl",
               answerField: "content",
@@ -372,6 +373,14 @@ function registerIpc() {
     return r.canceled ? { files: [], errors: [] } : stageFiles(r.filePaths);
   });
   ipcMain.handle("attachmentPreview", (_e, p: string) => preview(p));
+  ipcMain.handle("pickPaths", async (_e, kind: string) => {
+    const r = await dialog.showOpenDialog(win!, {
+      title: kind === "file" ? "选择要交给智能体的文件（原地访问，不复制）" : "选择要交给智能体的文件夹（原地访问，不复制）",
+      properties: [kind === "file" ? "openFile" : "openDirectory", "multiSelections"],
+    });
+    return r.canceled ? [] : r.filePaths.map(checkPath);
+  });
+  ipcMain.handle("checkPath", (_e, p: string) => checkPath(String(p ?? "")));
   ipcMain.handle("sandboxAccess", async (_e, projectId: string) => {
     const p = projects.get(projectId);
     if (!p) throw new Error("没有这个项目");
@@ -408,6 +417,7 @@ function cleanOptions(options?: Partial<RunOptions>): RunOptions {
     codexEffort: String(options?.codexEffort ?? ""),
     claudeModel: String(options?.claudeModel ?? s.claudeModel ?? "").trim(),
     claudeEffort: String(options?.claudeEffort ?? s.claudeEffort ?? ""),
+    paths: cleanGrants(options?.paths),
   };
   if (opts.claudeModel && !/^[\w.\-:\[\]]+$/.test(opts.claudeModel)) throw new Error(`Claude 模型名称无效：${opts.claudeModel}`);
   if (opts.claudeEffort && !/^[a-z]+$/.test(opts.claudeEffort)) throw new Error(`Claude 思考等级无效：${opts.claudeEffort}`);
@@ -457,14 +467,17 @@ async function grantFullControl(folder: string): Promise<{ ok: boolean; output: 
  */
 /**
  * MAO_UI_SCRIPT=<js file>: run a script in the page that drives the real UI (clicks, typing) for demos/tests.
- * The script can print "__SHOT__:<png path>" to take a screenshot and "__QUIT__" to close the app.
+ * The script can print "__SHOT__:<png path>" to take a screenshot, "__SIZE__:w,h" to resize the window and "__QUIT__" to close the app.
  */
 function uiScript() {
   const f = process.env.MAO_UI_SCRIPT;
   if (!f || !win || PACKAGED) return; // development builds only
   win.webContents.on("console-message", (_e: unknown, _level: number, message: string) => {
     if (message.startsWith("__SHOT__:")) capture(message.slice(9).trim());
-    else if (message === "__QUIT__") setTimeout(() => app.quit(), 3000);
+    else if (message.startsWith("__SIZE__:")) {
+      const [w, h] = message.slice(9).split(",").map(Number);
+      win?.setSize(w, h);
+    } else if (message === "__QUIT__") setTimeout(() => app.quit(), 3000);
   });
   win.webContents.executeJavaScript(readFileSync(f, "utf8")).catch(() => {});
 }

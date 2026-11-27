@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import type { Activity, AgentDef, Attachment, AuthInfo, Settings, StageResult, Board, CodexModel, EnvStatus, MaoApi, Project, Quota, RunEvent, RunMeta, RunOptions, SubQuota, UpdateStatus } from "../../shared/types";
+import type { Activity, AgentDef, Attachment, AuthInfo, Settings, StageResult, Board, CodexModel, EnvStatus, MaoApi, PathGrant, Project, Quota, RunEvent, RunMeta, RunOptions, PathCheck, SubQuota, UpdateStatus } from "../../shared/types";
 import { SettingsPage } from "./Settings";
 import { ACT_ICON, AGENT_ORDER, EFFORT_TEXT, deriveCards, deriveLead, fmtSec, fmtTokens, setRegistry, WHO, who, type Activity as WorkerAct, type Card } from "./derive";
 
@@ -1321,6 +1321,11 @@ function Panel(props: { meta: RunMeta | null; project: Project | null; events: R
                 {m.options.splitSmall && <span className="tag">拆小任务</span>}
                 <span className="tag">Codex 模型 {m.options.codexModel || "默认"}</span>
                 {m.options.codexEffort && <span className="tag">Codex 推理 {EFFORT_TEXT[m.options.codexEffort] ?? m.options.codexEffort}</span>}
+                {(m.options.paths ?? []).map((g) => (
+                  <span key={g.path} className="tag" title={`${g.path}（所有智能体${g.write ? "可读写" : "只读"}）`}>
+                    {g.kind === "dir" ? "📁" : "📄"} {g.path.length > 40 ? "…" + g.path.slice(-38) : g.path} · {g.write ? "可修改" : "只读"}
+                  </span>
+                ))}
               </div>
             )}
             {lead.model && <div className="muted small">Claude 模型 {lead.model} · {lead.mcp}</div>}
@@ -1351,19 +1356,45 @@ const optsFromSettings = (s: Settings): RunOptions => ({ splitSmall: s.splitSmal
 
 function loadOpts(): RunOptions {
   try {
-    return { ...DEFAULT_OPTS, ...JSON.parse(localStorage.getItem("runOptions") ?? "{}") };
+    const { paths: _p, ...o } = JSON.parse(localStorage.getItem("runOptions") ?? "{}");
+    return { ...DEFAULT_OPTS, ...o };
   } catch {
     return DEFAULT_OPTS;
   }
 }
 
-function OptionsRow({ opts, setOpts, models, midway }: { opts: RunOptions; setOpts: (o: RunOptions) => void; models: CodexModel[]; midway?: boolean }) {
+/** Composer options as compact chips: [Claude Opus · 中] [Codex … · 高] [拆小 ✓], each opening a small popover.
+ *  On a narrow composer (container query) they collapse into one [⚙ 模型] chip with everything in one popover. */
+function OptionsChips({ opts, setOpts, models, midway }: { opts: RunOptions; setOpts: (o: RunOptions) => void; models: CodexModel[]; midway?: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState<null | "claude" | "codex" | "all">(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(null);
+    };
+    const k = (e: KeyboardEvent) => e.key === "Escape" && setOpen(null);
+    document.addEventListener("mousedown", h);
+    document.addEventListener("keydown", k);
+    return () => {
+      document.removeEventListener("mousedown", h);
+      document.removeEventListener("keydown", k);
+    };
+  }, [open]);
   const model = models.find((m) => m.slug === opts.codexModel);
   const efforts = model?.efforts ?? ["low", "medium", "high", "xhigh"];
-  return (
-    <div className="options" title={midway ? "改了从下一条消息开始生效" : undefined}>
-      <label className="sel" title="主管 Claude 用的模型；默认值在 设置 → 默认选项">
-        Claude 模型
+  const cm = opts.claudeModel ? (CLAUDE_MODEL_TEXT[opts.claudeModel] ?? opts.claudeModel) : "默认";
+  const ce = opts.claudeEffort ? (EFFORT_TEXT[opts.claudeEffort] ?? opts.claudeEffort) : "";
+  const xm = model?.name ?? (opts.codexModel || "默认");
+  const xe = opts.codexEffort ? (EFFORT_TEXT[opts.codexEffort] ?? opts.codexEffort) : "";
+  const later = midway ? "（改了从下一条消息开始生效）" : "";
+  const toggle = (w: "claude" | "codex" | "all") => setOpen((o) => (o === w ? null : w));
+
+  const claude = (
+    <div className="pop-group">
+      <div className="pop-title">Claude（主管）</div>
+      <label className="sel">
+        模型
         <select value={opts.claudeModel ?? ""} onChange={(e) => setOpts({ ...opts, claudeModel: e.target.value })}>
           <option value="">默认（Claude Code 设置）</option>
           {[...new Set([...CLAUDE_MODELS, ...(opts.claudeModel ? [opts.claudeModel] : [])])].map((m) => (
@@ -1373,8 +1404,8 @@ function OptionsRow({ opts, setOpts, models, midway }: { opts: RunOptions; setOp
           ))}
         </select>
       </label>
-      <label className="sel" title="Claude 的思考等级（--effort）">
-        Claude 思考
+      <label className="sel">
+        思考
         <select value={opts.claudeEffort ?? ""} onChange={(e) => setOpts({ ...opts, claudeEffort: e.target.value })}>
           <option value="">默认</option>
           {CLAUDE_EFFORTS.map((x) => (
@@ -1384,12 +1415,13 @@ function OptionsRow({ opts, setOpts, models, midway }: { opts: RunOptions; setOp
           ))}
         </select>
       </label>
-      <label className="check" title="让 Claude 把 Codex 的工作拆成几分钟能完成的小单元，每个单元审查通过后再委派下一个">
-        <input type="checkbox" checked={opts.splitSmall} onChange={(e) => setOpts({ ...opts, splitSmall: e.target.checked })} />
-        把任务拆小
-      </label>
+    </div>
+  );
+  const codex = (
+    <div className="pop-group">
+      <div className="pop-title">Codex</div>
       <label className="sel">
-        Codex 模型
+        模型
         <select value={opts.codexModel} onChange={(e) => setOpts({ ...opts, codexModel: e.target.value, codexEffort: "" })}>
           <option value="">默认（Codex 设置）</option>
           {models.map((m) => (
@@ -1400,7 +1432,7 @@ function OptionsRow({ opts, setOpts, models, midway }: { opts: RunOptions; setOp
         </select>
       </label>
       <label className="sel">
-        Codex 推理
+        推理
         <select value={opts.codexEffort} onChange={(e) => setOpts({ ...opts, codexEffort: e.target.value })}>
           <option value="">默认{model?.defaultEffort ? `（${EFFORT_TEXT[model.defaultEffort] ?? model.defaultEffort}）` : ""}</option>
           {efforts.map((e) => (
@@ -1410,6 +1442,152 @@ function OptionsRow({ opts, setOpts, models, midway }: { opts: RunOptions; setOp
           ))}
         </select>
       </label>
+    </div>
+  );
+  const split = (
+    <label className="check pop-check" title={SPLIT_TIP}>
+      <input type="checkbox" checked={opts.splitSmall} onChange={(e) => setOpts({ ...opts, splitSmall: e.target.checked })} />
+      把任务拆小
+    </label>
+  );
+  return (
+    <div className="optchips" ref={ref}>
+      <div className="chips-wide">
+        <button className={"chip" + (open === "claude" ? " open" : "")} onClick={() => toggle("claude")} title={`Claude 的模型和思考等级${later}`}>
+          <span className="chip-k">Claude</span> {cm}
+          {ce && <span className="chip-d"> · {ce}</span>}
+        </button>
+        <button className={"chip" + (open === "codex" ? " open" : "")} onClick={() => toggle("codex")} title={`Codex 的模型和推理强度${later}`}>
+          <span className="chip-k">Codex</span> {xm}
+          {xe && <span className="chip-d"> · {xe}</span>}
+        </button>
+        <button className={"chip" + (opts.splitSmall ? " active" : "")} onClick={() => setOpts({ ...opts, splitSmall: !opts.splitSmall })} title={SPLIT_TIP}>
+          拆小 {opts.splitSmall ? "✓" : "✗"}
+        </button>
+      </div>
+      <div className="chips-narrow">
+        <button className={"chip" + (open === "all" ? " open" : "")} onClick={() => toggle("all")} title={`Claude ${cm}${ce ? " · " + ce : ""}｜Codex ${xm}${xe ? " · " + xe : ""}｜拆小${opts.splitSmall ? "开" : "关"}${later}`}>
+          ⚙ 模型
+        </button>
+      </div>
+      {open && (
+        <div className={"optpop " + open}>
+          {open !== "codex" && claude}
+          {open === "all" && split}
+          {open !== "claude" && codex}
+          {midway && <div className="muted small">改了从下一条消息开始生效</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+const SPLIT_TIP = "把任务拆小：让 Claude 把 Codex 的工作拆成几分钟能完成的小单元，每个单元审查通过后再委派下一个";
+
+/** 「+」: attach files (copied) or hand paths to the agents in place. */
+function AddMenu(props: { disabled: boolean; onFiles: () => void; onPaths: (kind: "dir" | "file") => void; onTyped: (p: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const [txt, setTxt] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) {
+        setOpen(false);
+        setTyping(false);
+      }
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const pick = (f: () => void) => {
+    setOpen(false);
+    f();
+  };
+  return (
+    <div className="addmenu" ref={ref}>
+      <button className={"btn plus" + (open ? " open" : "")} disabled={props.disabled} onClick={() => setOpen((o) => !o)} title="添加文件或文件路径" aria-label="添加">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+          <path d="M8 3v10M3 8h10" />
+        </svg>
+      </button>
+      {open && (
+        <div className="menu-pop">
+          <button onClick={() => pick(props.onFiles)} title="复制一份到应用的附件文件夹（也可以直接 Ctrl+V 粘贴或拖进输入框）">
+            <span className="mi">📎</span>
+            <span>
+              添加文件<small>复制一份交给 Claude，图片 ≤20 MB，文件 ≤50 MB</small>
+            </span>
+          </button>
+          <button onClick={() => pick(() => props.onPaths("dir"))}>
+            <span className="mi">📁</span>
+            <span>
+              添加文件夹路径<small>不复制，各位智能体原地访问（默认只读）</small>
+            </span>
+          </button>
+          <button onClick={() => pick(() => props.onPaths("file"))}>
+            <span className="mi">📄</span>
+            <span>
+              添加文件路径<small>不复制，各位智能体原地访问（默认只读）</small>
+            </span>
+          </button>
+          {typing ? (
+            <div className="mi-input">
+              <input
+                autoFocus
+                value={txt}
+                placeholder="粘贴或输入完整路径，回车添加"
+                onChange={(e) => setTxt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && txt.trim()) {
+                    props.onTyped(txt.trim());
+                    setTxt("");
+                    setTyping(false);
+                    setOpen(false);
+                  } else if (e.key === "Escape") setTyping(false);
+                }}
+              />
+            </div>
+          ) : (
+            <button onClick={() => setTyping(true)}>
+              <span className="mi">⌨</span>
+              <span>
+                输入或粘贴路径<small>例如 D:\资料\需求文档</small>
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Paths handed to the agents in place: 📁 path [只读 / 可修改] ×. */
+function GrantChips({ list, onChange }: { list: PathGrant[]; onChange: (l: PathGrant[]) => void }) {
+  if (!list.length) return null;
+  const short = (p: string) => (p.length > 46 ? "…" + p.slice(-44) : p);
+  return (
+    <div className="grants">
+      {list.map((g) => (
+        <span key={g.path} className={"grant" + (g.write ? " w" : "")}>
+          <span className="gpath" title={`${g.path}\n所有智能体都能${g.write ? "读取和修改" : "读取（不能修改）"}；这个对话里一直有效`}>
+            {g.kind === "dir" ? "📁" : "📄"} {short(g.path)}
+          </span>
+          <button
+            className="gmode"
+            title="点击切换：只读 / 可修改"
+            onClick={() => {
+              if (!g.write && !confirm(`允许所有智能体修改「${g.path}」${g.kind === "dir" ? "里的文件" : ""}吗？\n（删除、覆盖都可能发生；只读更安全）`)) return;
+              onChange(list.map((x) => (x.path === g.path ? { ...x, write: !x.write } : x)));
+            }}
+          >
+            {g.write ? "可修改" : "只读"}
+          </button>
+          <button className="gx" title="移除（智能体不再能访问）" onClick={() => onChange(list.filter((x) => x.path !== g.path))}>
+            ×
+          </button>
+        </span>
+      ))}
     </div>
   );
 }
@@ -1450,7 +1628,8 @@ function AppInner() {
   const setOpts = (o: RunOptions) => {
     setOptsState(o);
     try {
-      localStorage.setItem("runOptions", JSON.stringify(o));
+      const { paths: _p, ...keep } = o;
+      localStorage.setItem("runOptions", JSON.stringify(keep));
     } catch {
       /* ignore */
     }
@@ -1566,6 +1745,23 @@ function AppInner() {
     if (isNew || !meta) return setOpts(o);
     mao.setRunOptions(meta.id, o).catch((e) => setError(cleanError(e)));
   };
+  const grants = shownOpts.paths ?? [];
+  const setGrants = (l: PathGrant[]) => changeOpts({ ...shownOpts, paths: l });
+  const addGrants = (checks: PathCheck[]) => {
+    const cur = [...grants];
+    const errs: string[] = [];
+    for (const c of checks) {
+      if (c.error) {
+        errs.push(`${c.path}：${c.error}`);
+        continue;
+      }
+      if (cur.some((g) => g.path.toLowerCase() === c.path.toLowerCase())) continue;
+      if (c.warn && !confirm(`${c.warn}\n\n仍然把「${c.path}」交给所有智能体（只读）吗？`)) continue;
+      cur.push({ path: c.path, kind: c.kind, write: false });
+    }
+    if (errs.length) setError(errs.join("；"));
+    if (cur.length !== grants.length) setGrants(cur);
+  };
   // The latest DeepSeek result of this conversation says its sandbox could not be prepared in the project folder.
   const lastDs = [...events].reverse().find((e) => e.k === "delegate_result" && e.who === "deepseek");
   const needGrant = !!lastDs && lastDs.k === "delegate_result" && /SANDBOX_ACL/.test(lastDs.error ?? "");
@@ -1583,6 +1779,7 @@ function AppInner() {
       } else if (isNew) {
         if (!project) throw new Error("请先在左侧选择或新建一个项目");
         const m = await mao.startRun(text, project.id, opts, att);
+        setOptsState((o) => ({ ...o, paths: [] }));
         await selectRun(m.id);
       }
       setDraft("");
@@ -1694,6 +1891,7 @@ function AppInner() {
               <SandboxGrant projectId={project.id} />
             </div>
           )}
+          <GrantChips list={grants} onChange={setGrants} />
           {att.length > 0 && <Attachments list={att} onRemove={(a) => setAtt((l) => l.filter((x) => x.path !== a.path))} />}
           <textarea
             value={draft}
@@ -1714,10 +1912,13 @@ function AppInner() {
             }}
           />
           <div className="composer-actions">
-            <button className="btn attach" disabled={!canAttach} title="添加图片或文件（也可以直接 Ctrl+V 粘贴或拖进来；图片 ≤20 MB，文件 ≤50 MB）" onClick={() => mao.pickAttachments().then(addStaged)}>
-              📎
-            </button>
-            {project && <OptionsRow opts={shownOpts} setOpts={changeOpts} models={models} midway={!isNew} />}
+            <AddMenu
+              disabled={!canAttach}
+              onFiles={() => mao.pickAttachments().then(addStaged)}
+              onPaths={(k) => mao.pickPaths(k).then(addGrants)}
+              onTyped={(p) => mao.checkPath(p.replace(/^["']|["']$/g, "")).then((c) => addGrants([c]))}
+            />
+            {project && <OptionsChips opts={shownOpts} setOpts={changeOpts} models={models} midway={!isNew} />}
             <span className="hint" title="Ctrl+Enter 发送；可以 Ctrl+V 粘贴或拖入图片和文件">{running ? "Ctrl+Enter 引导" : "Ctrl+Enter 发送"}</span>
             {running ? (
               <>

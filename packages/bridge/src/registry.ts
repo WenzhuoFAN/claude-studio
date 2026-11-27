@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { freshUserEnv } from "./locate.js";
 import { runAgent, type AgentResult, type Parser, type Usage } from "./runner.js";
+import { grantDir, grantsNote, pathGrants } from "./agents.js";
 
 export interface AgentDef {
   id: string;
@@ -41,11 +42,11 @@ export interface AgentDef {
  * Fill {task} {cwd} {model} {effort} in an args template. A {model}/{effort} token that ends up empty is
  * dropped together with the flag right before it ("-m {model}" with no model → nothing).
  */
-export function fillArgs(template: string, vars: { cwd: string; task: string; model: string; effort: string }): string[] {
+export function fillArgs(template: string, vars: { cwd: string; task: string; model: string; effort: string; dirs?: string }): string[] {
   const toks = splitArgs(template ?? "");
   const out: string[] = [];
   for (const tok of toks) {
-    if ((tok === "{model}" && !vars.model) || (tok === "{effort}" && !vars.effort)) {
+    if ((tok === "{model}" && !vars.model) || (tok === "{effort}" && !vars.effort) || (tok === "{dirs}" && !vars.dirs)) {
       if (out.length && out[out.length - 1].startsWith("-")) out.pop();
       continue;
     }
@@ -53,6 +54,7 @@ export function fillArgs(template: string, vars: { cwd: string; task: string; mo
       .replace(/\{cwd\}/g, vars.cwd)
       .replace(/\{model\}/g, vars.model)
       .replace(/\{effort\}/g, vars.effort)
+      .replace(/\{dirs\}/g, vars.dirs ?? "")
       .replace(/\{task\}/g, vars.task);
     if (v !== "") out.push(v);
   }
@@ -165,7 +167,10 @@ export async function runCliAgent(def: AgentDef, task: string, cwd: string, time
   const isScript = /\.(cmd|bat)$/i.test(c.exe);
   if (isScript && c.input === "arg") throw new Error(`${def.name}: .cmd/.bat 程序只支持通过 stdin 传任务（避免命令行注入）`);
   const useModel = model || def.defaultModel || "";
-  const args = fillArgs(c.args ?? "", { cwd, task: c.input === "arg" ? task : "", model: useModel, effort: def.defaultEffort || "" });
+  // {dirs}: the folders of the paths the user attached (comma-separated, e.g. Gemini's --include-directories)
+  const dirs = [...new Set(pathGrants().map(grantDir))].join(",");
+  task = grantsNote() + task;
+  const args = fillArgs(c.args ?? "", { cwd, task: c.input === "arg" ? task : "", model: useModel, effort: def.defaultEffort || "", dirs });
   if (c.input === "arg" && !(c.args ?? "").includes("{task}")) args.push(task);
   const quote = (a: string) => (/[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
   const { env, secrets } = freshUserEnv();

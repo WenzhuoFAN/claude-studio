@@ -94,6 +94,10 @@ export class AgentStore extends EventEmitter {
         a.cli.args = a.cli.args.replace(m[0], `${m[1]}${m[2]} {model}`);
       }
     }
+    // 1.1.4: Gemini CLI reads the paths attached to a conversation through --include-directories {dirs}.
+    for (const a of list)
+      if (a.type === "cli" && a.cli?.args && /gemini/i.test(a.cli.args) && !a.cli.args.includes("{dirs}") && !/--include-directories/.test(a.cli.args))
+        a.cli.args += " --include-directories {dirs}";
     // Built-ins first (Codex, DeepSeek), then the user's agents in the order they were added.
     const rank = (a: AgentDef) => (a.builtin ? BUILTINS.findIndex((b) => b.id === a.id) : 100);
     this.list = list.map((a, i) => ({ a, i })).sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i).map((x) => x.a);

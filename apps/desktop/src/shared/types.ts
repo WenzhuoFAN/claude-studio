@@ -89,6 +89,24 @@ export interface RunOptions {
   claudeModel?: string;
   /** Claude reasoning effort; empty = Settings default. */
   claudeEffort?: string;
+  /** Files / folders attached in place (「+」→「添加文件路径」): every agent may access them. */
+  paths?: PathGrant[];
+}
+
+export interface PathGrant {
+  path: string;
+  kind: "dir" | "file";
+  /** false = read-only (default) */
+  write: boolean;
+}
+
+export interface PathCheck {
+  path: string;
+  kind: "dir" | "file";
+  /** allowed, but very broad: ask the user first */
+  warn?: string;
+  /** refused */
+  error?: string;
 }
 
 /** A file the user pasted / dropped / picked; copied into the app's attachments folder. */
@@ -251,6 +269,9 @@ export interface MaoApi {
   stageBlob(name: string, mime: string, data: Uint8Array): Promise<StageResult>;
   /** File picker, then stage. */
   pickAttachments(): Promise<StageResult>;
+  /** 「添加文件路径」: pick folders / files (paths only, nothing is copied). */
+  pickPaths(kind: "dir" | "file"): Promise<PathCheck[]>;
+  checkPath(p: string): Promise<PathCheck>;
   /** data: URL of an image attachment (only files inside the attachments folder). */
   attachmentPreview(path: string): Promise<string | null>;
   /** Path of a dropped / pasted File object (Electron webUtils); "" when it has none. */

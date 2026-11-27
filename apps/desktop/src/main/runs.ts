@@ -6,6 +6,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import type { Activity, Attachment, RunEvent, RunEventBody, RunMeta, RunOptions, Worker } from "../shared/types";
 import { adopt, runAttachDir } from "./attachments";
+import { claudeRule, cleanGrants, grantsPrompt } from "./grants";
 import { ALLOWED_TOOLS, BRIDGE, CLAUDE_MD, ROOT, RUNS, boardPath, locateClaude } from "./paths";
 import { WorkerTail } from "./workers";
 import { withBoard, type ConvState } from "../../../../packages/bridge/src/board";
@@ -421,6 +422,8 @@ export class RunManager extends EventEmitter {
     }
     const runDir = this.dir(id);
     const attDir = runAttachDir(id);
+    // Paths attached in place (re-checked: one may have been deleted, or be refused by now).
+    const grants = cleanGrants(meta.options?.paths);
     // Always readable: a steering message sent mid-turn may bring the first attachments.
     mkdirSync(attDir, { recursive: true });
     // Per-run MCP config: absolute bridge path, worker logs go into this run's folder.
@@ -452,6 +455,7 @@ export class RunManager extends EventEmitter {
               ...(meta.options?.codexEffort ? { MAO_CODEX_EFFORT: meta.options.codexEffort } : {}),
               ...(existsSync(attDir) ? { MAO_ATTACH_DIR: attDir } : {}),
               MAO_DSH_COMMANDS: this.ctx.settings().dshCommands === false ? "0" : "1",
+              ...(grants.length ? { MAO_PATH_GRANTS: JSON.stringify(grants) } : {}),
             },
           },
         },
@@ -461,6 +465,10 @@ export class RunManager extends EventEmitter {
     // stream-json in both directions: stdin stays open for steering messages; claude echoes each
     // user message back (--replay-user-messages) when it actually reads it.
     const args = ["-p", "--input-format", "stream-json", "--replay-user-messages", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile, "--strict-mcp-config", "--permission-mode", "dontAsk", "--allowedTools", ...allowed];
+    // Attached paths: readable (Read/Glob/Grep rules); read-only ones also get Edit/Write denied (deny wins).
+    for (const g of grants) args.push(`Read(${claudeRule(g)})`);
+    const deny = grants.filter((g) => !g.write).flatMap((g) => [`Edit(${claudeRule(g)})`, `Write(${claudeRule(g)})`]);
+    if (deny.length) args.push("--disallowedTools", ...deny);
     if (!first && meta.sessionId) args.push("--resume", meta.sessionId);
     // Per-conversation choice (composer), else 设置 (conversations from before 1.1.1 have no choice stored).
     const st = this.ctx.settings();
@@ -477,6 +485,7 @@ export class RunManager extends EventEmitter {
     if (st.dshCommands !== false) sys += "\n" + DSH_RULES;
     if (meta.projectId) sys += "\n" + COLLAB_RULES + `\n你的对话编号：${meta.id}`;
     if (meta.options?.splitSmall) sys += "\n" + SPLIT_RULE;
+    sys += grantsPrompt(grants);
     sys += "\n[模型] 每个智能体的默认模型由用户在设置里选定；委派时不要传 model 参数，除非用户在对话里明确要求某个模型。";
     if (meta.options?.codexModel || meta.options?.codexEffort)
       sys += `\n[Codex 设置] 用户已为 Codex 选定模型 ${meta.options.codexModel || "默认"}、推理强度 ${meta.options.codexEffort || "默认"}；调用 delegate_to_codex 时不要传 model / reasoningEffort 参数。`;

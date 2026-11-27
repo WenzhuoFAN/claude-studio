@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { deepseekKey, locateCodex, locateDsh } from "./locate.js";
 import { codexLoggedIn, ensureCodexLogin, looksLikeAuthError } from "./auth.js";
@@ -17,6 +18,40 @@ export function checkCwd(cwd: string): string {
 }
 
 /** This conversation's attachments folder (set by the desktop app), if it exists. */
+/** Paths the user attached to the conversation in place (MAO_PATH_GRANTS, set by the app). */
+export interface PathGrant {
+  path: string;
+  kind: "dir" | "file";
+  write: boolean;
+}
+export function pathGrants(): PathGrant[] {
+  try {
+    const l = JSON.parse(process.env.MAO_PATH_GRANTS || "[]");
+    return Array.isArray(l) ? l.filter((g) => g && typeof g.path === "string" && path.isAbsolute(g.path) && existsSync(g.path)) : [];
+  } catch {
+    return [];
+  }
+}
+/** Inside %TEMP% / %TMP% (writable by default in Codex's workspace-write sandbox). */
+function inTemp(p: string): boolean {
+  const roots = [process.env.TEMP, process.env.TMP, os.tmpdir()].filter((x): x is string => !!x).map((x) => path.resolve(x).toLowerCase());
+  const q = path.resolve(p).toLowerCase();
+  return roots.some((r) => q === r || q.startsWith(r.endsWith(path.sep) ? r : r + path.sep));
+}
+/** Folder to hand an agent for a grant (a file's own folder). */
+export const grantDir = (g: PathGrant) => (g.kind === "dir" ? g.path : path.dirname(g.path));
+/** Told to every file-capable worker. */
+export function grantsNote(): string {
+  const l = pathGrants();
+  if (!l.length) return "";
+  return (
+    "[Extra paths] The user attached these paths to this task (outside the working directory):\n" +
+    l.map((g) => `- ${g.path} (${g.kind === "dir" ? "folder" : "file"}, ${g.write ? "read-write" : "READ-ONLY: do not modify, delete or move anything there"})`).join("\n") +
+    (l.some((g) => g.kind === "file") ? "\nFor a file entry only that file is in scope, not the rest of its folder." : "") +
+    "\n\n"
+  );
+}
+
 export function attachDir(): string | null {
   const d = process.env.MAO_ATTACH_DIR;
   return d && path.isAbsolute(d) && existsSync(d) && statSync(d).isDirectory() ? path.resolve(d) : null;
@@ -126,6 +161,11 @@ async function delegateToCodexOnce(a: {
   args.push("--json", "--skip-git-repo-check", "-s", a.mode, "-C", cwd);
   const att = attachDir();
   if (att && a.mode === "workspace-write") args.push("--add-dir", att);
+  // Writable user paths become extra writable roots; read-only ones need nothing (Codex can read them).
+  if (a.mode === "workspace-write") for (const g of pathGrants()) if (g.write) args.push("--add-dir", grantDir(g));
+  // workspace-write also makes %TEMP% writable: a read-only path inside it would be writable too, so drop that root then.
+  if (a.mode === "workspace-write" && pathGrants().some((g) => !g.write && inTemp(g.path)))
+    args.push("-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", "sandbox_workspace_write.exclude_slash_tmp=true");
   // Model / effort: explicit argument, else the defaults the launcher put in the env, else Codex's own config.
   const model = a.model || process.env.MAO_CODEX_MODEL;
   const effort = a.reasoningEffort || process.env.MAO_CODEX_EFFORT;
@@ -151,7 +191,7 @@ async function delegateToCodexOnce(a: {
     args,
     env,
     cwd,
-    task: WORKER_PREAMBLE + a.task,
+    task: WORKER_PREAMBLE + grantsNote() + a.task,
     timeoutSec: a.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
     parser: new CodexParser(),
     meta: { mode: a.mode, allowNetwork: !!a.allowNetwork, model: model ?? null, reasoningEffort: effort ?? null },
@@ -312,12 +352,21 @@ export async function delegateToDeepseek(a: { task: string; cwd: string; timeout
   const key = deepseekKey();
   const env = { ...process.env };
   if (key) env.DEEPSEEK_API_KEY = key;
+  // dsh's file tools may also write under os.tmpdir(): a read-only path inside %TEMP% would be writable,
+  // so give it a temp folder of its own then.
+  if (pathGrants().some((g) => !g.write && inTemp(g.path))) {
+    const t = path.join(LOG_DIR, "dsh-tmp");
+    mkdirSync(t, { recursive: true });
+    env.TEMP = env.TMP = t;
+  }
   // The workspace of a headless dsh run is its cwd; `workspace-write` lets it edit only there.
   // (--add-dir is for *additional* dirs, so it is not needed for cwd itself.)
   const dshArgs = ["--profile", "headless", "--json", "--permission-mode", "workspace-write", "--approval-policy", "never"];
   // Let it read the conversation's attachments (the path is quoted for cmd: the app data folder has spaces).
   const att = attachDir();
   if (att) dshArgs.push("--add-dir", /\.(cmd|bat)$/i.test(dsh) ? `"${att}"` : att);
+  // Writable user paths: extra writable dirs (its sandbox may need the same 「完全控制」 as the project folder).
+  for (const g of pathGrants()) if (g.write) dshArgs.push("--add-dir", /\.(cmd|bat)$/i.test(dsh) ? `"${grantDir(g)}"` : grantDir(g));
   // The model override is a launcher flag: it goes before the profile's own args.
   if (patchFile) dshArgs.splice(2, 0, "--patch", /\.(cmd|bat)$/i.test(dsh) ? `"${patchFile}"` : patchFile);
   dshArgs.push("-");
@@ -330,9 +379,9 @@ export async function delegateToDeepseek(a: { task: string; cwd: string; timeout
     windowsVerbatimArguments: isCmd,
     cwd,
     env,
-    task: WORKER_PREAMBLE + (process.env.MAO_DSH_COMMANDS !== "0" ? DSH_COMMAND_RULES : DSH_NO_COMMANDS) + a.task,
+    task: WORKER_PREAMBLE + grantsNote() + (process.env.MAO_DSH_COMMANDS !== "0" ? DSH_COMMAND_RULES : DSH_NO_COMMANDS) + a.task,
     timeoutSec: a.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
-    parser: new DshParser(cwd, att ? [att] : [], process.env.MAO_DSH_COMMANDS !== "0"),
+    parser: new DshParser(cwd, [...(att ? [att] : []), ...pathGrants().filter((g) => g.write).map(grantDir)], process.env.MAO_DSH_COMMANDS !== "0"),
     secrets: key ? [key] : [],
   }).then((r) => ({ ...r, model: (model || "默认") + (effort ? ` · ${effort}` : "") }));
 }
